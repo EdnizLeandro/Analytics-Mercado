@@ -7,23 +7,18 @@ import streamlit as st
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score, mean_absolute_error
 
-# Suppress warnings and unnecessary logs
 warnings.filterwarnings("ignore")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 logging.getLogger('prophet').setLevel(logging.ERROR)
 
-# Advanced models
 try:
     from statsmodels.tsa.holtwinters import ExponentialSmoothing
     from statsmodels.tsa.arima.model import ARIMA
     from statsmodels.tsa.statespace.sarimax import SARIMAX
-    import statsmodels.api as sm
-    import tensorflow as tf
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense
     from tensorflow.keras.optimizers import Adam
-
     from xgboost import XGBRegressor
     from prophet import Prophet
     try:
@@ -35,7 +30,6 @@ except Exception as e:
     st.error(f"Erro ao importar bibliotecas de previsão: {e}")
     st.stop()
 
-# ------ Função utilitária -------
 def formatar_moeda(valor):
     try:
         return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -61,7 +55,6 @@ def safe_forecast_list(forecast_list):
         safe.append(vv)
     return safe
 
-# ------ Classe principal -------
 class MercadoTrabalhoStreamlit:
     def __init__(self, df):
         self.df = df
@@ -81,7 +74,6 @@ class MercadoTrabalhoStreamlit:
             self.df[col] = self.df[col].fillna(self.df[col].median())
         self.df.drop_duplicates(inplace=True)
         self.df.reset_index(drop=True, inplace=True)
-
         for col in self.df.columns:
             col_lower = col.lower().replace(' ', '').replace('_', '')
             if 'cbo' in col_lower and 'ocupa' in col_lower:
@@ -102,7 +94,6 @@ class MercadoTrabalhoStreamlit:
     def converter_data(self, df_cbo):
         df_cbo = df_cbo.copy()
         col = self.coluna_data
-        # tentativa robusta: aceita formatos yyyymm, yyyy-mm
         try:
             if df_cbo[col].dtype != 'datetime64[ns]':
                 df_cbo[col] = df_cbo[col].astype(str)
@@ -118,7 +109,6 @@ class MercadoTrabalhoStreamlit:
         except Exception:
             return pd.DataFrame()
 
-    # --- Modelos avançados (linear, ARIMA, SARIMA, HW, etc.) ---
     def prever_com_modelos(self, df_serie, anos_futuros=[5, 10, 15, 20]):
         resultados = {}
         df_serie = df_serie.sort_values('data').reset_index(drop=True)
@@ -215,7 +205,6 @@ class MercadoTrabalhoStreamlit:
                 X_lstm = X_lstm.reshape((X_lstm.shape[0], X_lstm.shape[1], 1))
 
                 if self.lstm_model is None:
-                    # construir e treinar
                     model = Sequential()
                     model.add(LSTM(50, input_shape=(X_lstm.shape[1], 1)))
                     model.add(Dense(1))
@@ -265,26 +254,24 @@ class MercadoTrabalhoStreamlit:
         if df_cbo.empty or self.coluna_data not in df_cbo or self.coluna_salario not in df_cbo:
             st.warning("Nenhum dado disponível para análise.")
             return
-
         st.subheader("Análise Salarial - Previsão Avançada")
+        plot_area = st.empty()  # Reservar espaço fixo para gráfico ou info
         df_cbo = self.converter_data(df_cbo)
         if df_cbo.empty or df_cbo['data_convertida'].isnull().all():
-            st.warning("Dados de datas inválidos para previsão.")
+            plot_area.warning("Dados de datas inválidos para previsão.")
             return
         df_mensal = df_cbo.groupby('data_convertida')[self.coluna_salario].mean().reset_index()
         df_mensal.columns = ['data', 'valor']
         salario_atual = df_mensal['valor'].iloc[-1]
         st.write(f"Salário médio atual: **R$ {formatar_moeda(salario_atual)}**")
-
         if len(df_mensal) < 10:
-            st.info("Dados insuficientes para aplicar modelos avançados. Exibindo média projetada constante.")
+            plot_area.info("Dados insuficientes para aplicar modelos avançados. Exibindo média projetada constante.")
             for anos in anos_futuros:
                 st.write(f"- {anos} anos → R$ {formatar_moeda(salario_atual)}")
         else:
             resultados = self.prever_com_modelos(df_mensal, anos_futuros)
             melhores = [(m, d) for m, d in resultados.items() if d is not None]
             if melhores:
-                # melhor pelo maior R²
                 melhor = max(melhores, key=lambda x: x[1]['r2'] if np.isfinite(x[1]['r2']) else -np.inf)
                 nome_melhor = melhor[0]
                 dados_melhor = melhor[1]
@@ -293,9 +280,10 @@ class MercadoTrabalhoStreamlit:
                 for i, anos in enumerate(anos_futuros):
                     st.write(f"- {anos} anos → R$ {formatar_moeda(dados_melhor['previsoes'][i])}")
             else:
-                st.warning("Nenhum modelo gerou resultados válidos.")
+                plot_area.warning("Nenhum modelo gerou resultados válidos.")
 
-# ---------------- STREAMLIT APP -------------
+# ----------- STREAMLIT APP -----------
+st.set_page_config(page_title="Mercado de Trabalho Avançado", layout="wide")
 st.title("📊 Análise Avançada do Mercado de Trabalho")
 st.write("Digite código ou descrição da profissão para previsões detalhadas.")
 
