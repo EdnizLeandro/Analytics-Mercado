@@ -69,7 +69,6 @@ class MercadoTrabalhoPredictor:
     def __init__(self, df, df_cbo):
         self.df = df
         self.df_cbo = df_cbo
-        self.cleaned = False
         # Força nomes certos das colunas pela sua base padrão
         self.coluna_cbo = "cbo2002ocupacao"
         self.coluna_data = "competenciamov"
@@ -82,7 +81,6 @@ class MercadoTrabalhoPredictor:
         self.df[self.coluna_cbo] = self.df[self.coluna_cbo].astype(str)
         self.df_cbo = self.df_cbo.rename(columns={"Código": "cbo_codigo", "Descrição": "cbo_descricao"})
         self.df_cbo['cbo_codigo'] = self.df_cbo['cbo_codigo'].astype(str)
-        self.cleaned = True
 
     def buscar_profissao(self, entrada: str):
         entrada = entrada.strip()
@@ -118,6 +116,7 @@ class MercadoTrabalhoPredictor:
         datas = df_serie['data']
         X = np.arange(len(df_serie)).reshape(-1,1)
         y = df_serie['valor'].values
+
         # Linear
         try:
             model_lr = LinearRegression().fit(X, y)
@@ -239,18 +238,30 @@ class MercadoTrabalhoPredictor:
 
     def prever_mercado_streamlit(self, cbo_codigo, anos_futuros=[5,10,15,20]):
         df_cbo = self.filtrar_registros_dados(cbo_codigo)
+        if df_cbo.empty:
+            st.error(f"Nenhum registro para o CBO {cbo_codigo} na base de dados! Selecione outro.")
+            return
         prof_info = self.df_cbo[self.df_cbo['cbo_codigo'] == cbo_codigo]
         nome_profissao = prof_info.iloc[0]['cbo_descricao'] if not prof_info.empty else f"CBO_{cbo_codigo}"
         st.subheader(f"{nome_profissao} (CBO {cbo_codigo})")
-        if df_cbo.empty:
-            st.warning("Nenhum registro encontrado.")
+        try:
+            df_cbo = self.converter_data_robusta(df_cbo)
+        except Exception as e:
+            st.error(f"Erro ao processar datas: {e}")
             return
-        df_cbo = self.converter_data_robusta(df_cbo)
         if df_cbo.empty:
             st.warning("Dados temporais inválidos.")
             return
-        df_mensal = df_cbo.groupby('data_convertida')[self.coluna_salario].mean().reset_index()
-        df_mensal.columns=['data','valor']
+        try:
+            df_mensal = df_cbo.groupby('data_convertida')[self.coluna_salario].mean().reset_index()
+            df_mensal.columns=['data','valor']
+        except Exception as e:
+            st.error(f"Erro ao calcular salários agrupados: {e}")
+            st.write(df_cbo.head())
+            return
+        if df_mensal.empty:
+            st.warning("Não há histórico suficiente para projeção salarial.")
+            return
         salario_atual = df_mensal['valor'].iloc[-1]
         st.write(f"Salário médio atual: **R$ {formatar_moeda(salario_atual)}**")
         if len(df_mensal)<10:
@@ -311,7 +322,7 @@ class MercadoTrabalhoPredictor:
         else:
             st.info("Coluna 'saldomovimentacao' não disponível para tendência do mercado.")
 
-# --------------------- STREAMLIT APP INICIO ---------------------
+# ---- STREAMLIT APP INICIO ----
 st.set_page_config(page_title="Mercado de Trabalho Avançado", layout="wide")
 st.title("📊 Análise Avançada do Mercado de Trabalho")
 
@@ -331,12 +342,14 @@ if entrada:
         st.write(f"{len(resultados)} profissão(ões) encontrada(s):")
         for idx, row in resultados.iterrows():
             st.write(f"- [{row['cbo_codigo']}] {row['cbo_descricao']}")
-        # Menu de seleção se múltiplas opções (nome+código)
         if len(resultados) == 1:
             cbo = resultados["cbo_codigo"].iloc[0]
         else:
-            # Selectbox mostra nome+código
             menu = resultados.apply(lambda r: f"{r['cbo_descricao']} [{r['cbo_codigo']}]", axis=1).tolist()
-            sel = st.selectbox("Escolha a profissão:", menu)
-            cbo = sel.split('[')[-1].replace(']','').strip()
+            idx_escolhido = st.selectbox(
+                "Escolha a profissão:",
+                range(len(menu)),
+                format_func=lambda i: menu[i]
+            )
+            cbo = resultados["cbo_codigo"].iloc[idx_escolhido]
         app.prever_mercado_streamlit(cbo)
