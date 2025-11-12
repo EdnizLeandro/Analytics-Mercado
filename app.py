@@ -2,12 +2,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
 
-# ==============================
-# CLASSE ORIGINAL (com prints -> st.write)
-# ==============================
+# ==========================================
+# Classe original adaptada (sem prints)
+# ==========================================
 class MercadoTrabalhoPredictor:
-    def __init__(self, filepath: str, codigos_filepath: str):
+    def __init__(self, filepath, codigos_filepath):
         self.filepath = filepath
         self.codigos_filepath = codigos_filepath
         self.df = None
@@ -21,30 +22,20 @@ class MercadoTrabalhoPredictor:
         return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     def carregar_dados(self):
-        st.info("📂 Carregando dataset...")
         self.df = pd.read_parquet(self.filepath)
-        st.success(f"Dataset carregado com {self.df.shape[0]} linhas e {self.df.shape[1]} colunas.")
-
-        st.info("📋 Carregando lista de códigos CBO...")
         self.df_codigos = pd.read_excel(self.codigos_filepath)
         self.df_codigos.columns = ['cbo_codigo', 'cbo_descricao']
         self.df_codigos['cbo_codigo'] = self.df_codigos['cbo_codigo'].astype(str)
-        st.success(f"{len(self.df_codigos)} profissões carregadas.")
 
     def limpar_dados(self):
-        st.info("🧹 Limpando dataset...")
         obj_cols = [col for col in self.df.columns if self.df[col].dtype == 'object']
         for col in obj_cols:
             self.df[col] = self.df[col].astype(str)
-
         for col in self.df.select_dtypes(include=['number']).columns:
             self.df[col] = self.df[col].fillna(self.df[col].median())
-
         self.df.drop_duplicates(inplace=True)
         self.df.reset_index(drop=True, inplace=True)
         self.cleaned = True
-        st.success(f"✅ Limpeza finalizada! ({self.df.shape[0]} linhas)")
-
         self._identificar_colunas()
 
     def _identificar_colunas(self):
@@ -57,111 +48,88 @@ class MercadoTrabalhoPredictor:
             if 'salario' in col_lower and 'fixo' in col_lower:
                 self.coluna_salario = col
 
-        st.write("### 🔍 Colunas identificadas automaticamente")
-        st.write(f"- CBO: **{self.coluna_cbo}**")
-        st.write(f"- DATA: **{self.coluna_data}**")
-        st.write(f"- SALÁRIO: **{self.coluna_salario}**")
-
-    def buscar_profissao(self, entrada: str):
+    def buscar_profissao(self, entrada):
         if not self.cleaned:
-            st.warning("⚠️ Limpe o dataset antes de buscar profissões.")
             return pd.DataFrame()
-
         if entrada.isdigit():
-            resultados = self.df_codigos[self.df_codigos['cbo_codigo'] == entrada]
-        else:
-            mask = self.df_codigos['cbo_descricao'].str.contains(entrada, case=False, na=False)
-            resultados = self.df_codigos[mask]
+            return self.df_codigos[self.df_codigos['cbo_codigo'] == entrada]
+        mask = self.df_codigos['cbo_descricao'].str.contains(entrada, case=False, na=False)
+        return self.df_codigos[mask]
 
-        if resultados.empty:
-            st.warning("Nenhuma profissão encontrada com esse nome ou código.")
-        else:
-            st.success(f"{len(resultados)} resultado(s) encontrado(s).")
-            st.dataframe(resultados)
-        return resultados
-
-    def prever_mercado(self, cbo_codigo: str, anos_futuros=[5, 10, 15, 20]):
+    def prever_mercado(self, cbo_codigo):
         if not self.cleaned:
-            st.warning("Dataset não limpo.")
-            return
-
-        if not all([self.coluna_cbo, self.coluna_data, self.coluna_salario]):
-            st.warning("Colunas necessárias não identificadas.")
-            return
-
-        prof_info = self.df_codigos[self.df_codigos['cbo_codigo'] == cbo_codigo]
-        if not prof_info.empty:
-            st.header(f"📊 Análise de Mercado: {prof_info.iloc[0]['cbo_descricao']} ({cbo_codigo})")
+            return None, None
 
         df_cbo = self.df[self.df[self.coluna_cbo].astype(str) == cbo_codigo].copy()
         if df_cbo.empty:
-            st.warning("Nenhum registro encontrado para este CBO.")
-            return
+            return None, None
 
-        st.write(f"**{len(df_cbo):,} registros encontrados.**")
-
-        # SALÁRIO MÉDIO E TENDÊNCIA
         df_cbo[self.coluna_data] = pd.to_datetime(df_cbo[self.coluna_data], errors='coerce')
         df_cbo = df_cbo.dropna(subset=[self.coluna_data])
-        if df_cbo.empty:
-            st.warning("Sem dados temporais válidos para previsão.")
-            return
-
         df_cbo['tempo_meses'] = ((df_cbo[self.coluna_data].dt.year - 2020) * 12 +
                                   df_cbo[self.coluna_data].dt.month)
         df_mensal = df_cbo.groupby('tempo_meses')[self.coluna_salario].mean().reset_index()
 
+        X = df_mensal[['tempo_meses']]
+        y = df_mensal[self.coluna_salario]
+        model = LinearRegression()
+        model.fit(X, y)
+
+        ult_mes = df_mensal['tempo_meses'].max()
         salario_atual = df_cbo[self.coluna_salario].mean()
-        st.metric("💰 Salário médio atual", f"R$ {self.formatar_moeda(salario_atual)}")
+        previsoes = []
+        for anos in [5, 10, 15, 20]:
+            mes_futuro = ult_mes + anos * 12
+            pred = model.predict(np.array([[mes_futuro]]))[0]
+            previsoes.append((anos, pred, ((pred - salario_atual) / salario_atual) * 100))
 
-        if len(df_mensal) >= 2:
-            X = df_mensal[['tempo_meses']]
-            y = df_mensal[self.coluna_salario]
-            model = LinearRegression()
-            model.fit(X, y)
+        return df_mensal, previsoes
 
-            ult_mes = df_mensal['tempo_meses'].max()
-            previsoes = []
-            for anos in anos_futuros:
-                mes_futuro = ult_mes + anos * 12
-                pred = model.predict(np.array([[mes_futuro]]))[0]
-                variacao = ((pred - salario_atual) / salario_atual) * 100
-                previsoes.append((anos, pred, variacao))
 
-            df_prev = pd.DataFrame(previsoes, columns=['Anos Futuro', 'Salário Previsto', 'Variação %'])
-            df_prev['Salário Previsto'] = df_prev['Salário Previsto'].apply(lambda x: f"R$ {self.formatar_moeda(x)}")
-            df_prev['Variação %'] = df_prev['Variação %'].apply(lambda x: f"{x:+.1f}%")
-            st.subheader("📈 Projeção Salarial")
-            st.dataframe(df_prev)
+# ==========================================
+# Interface Streamlit
+# ==========================================
+st.set_page_config(page_title="Previsão do Mercado de Trabalho", layout="wide")
+
+st.title("📊 Previsão do Mercado de Trabalho")
+st.markdown("Analise tendências salariais e de emprego com base nos dados do CAGED/CBO.")
+
+# Uploads
+dados_file = st.file_uploader("dados.parquet)", type=["parquet"])
+codigos_file = st.file_uploader("cbo.xlsx)", type=["xlsx"])
+
+if dados_file and codigos_file:
+    app = MercadoTrabalhoPredictor(dados_file, codigos_file)
+    app.carregar_dados()
+    app.limpar_dados()
+
+    st.success("✅ Dados carregados e preparados!")
+
+    busca = st.text_input("🔍 Digite o nome ou código da profissão:")
+    if busca:
+        resultados = app.buscar_profissao(busca)
+        if resultados.empty:
+            st.warning("Nenhuma profissão encontrada.")
         else:
-            st.info("Previsão baseada apenas na média atual (dados insuficientes).")
+            cbo_opcao = st.selectbox("Selecione o CBO:", resultados['cbo_codigo'] + " - " + resultados['cbo_descricao'])
+            cbo_codigo = cbo_opcao.split(" - ")[0]
 
+            if st.button("Gerar Previsão"):
+                df_mensal, previsoes = app.prever_mercado(cbo_codigo)
+                if df_mensal is None:
+                    st.error("Sem dados suficientes para prever.")
+                else:
+                    st.subheader("📈 Evolução Salarial Média")
+                    fig, ax = plt.subplots()
+                    ax.plot(df_mensal['tempo_meses'], df_mensal[app.coluna_salario], marker='o')
+                    ax.set_xlabel("Tempo (meses desde 2020)")
+                    ax.set_ylabel("Salário Médio (R$)")
+                    ax.set_title("Tendência Histórica de Salário")
+                    st.pyplot(fig)
 
-# ==============================
-# INTERFACE STREAMLIT
-# ==============================
-def main():
-    st.title("💼 Previsor de Mercado de Trabalho - CBO")
-    st.write("Faça upload dos arquivos necessários e explore as previsões por profissão.")
+                    st.subheader("🔮 Projeções Futuras")
+                    for anos, valor, variacao in previsoes:
+                        st.write(f"**{anos} anos → R$ {app.formatar_moeda(valor)} ({variacao:+.1f}%)**")
 
-    dados_file = st.file_uploader("Selecione o arquivo de dados (.parquet)", type=["parquet"])
-    codigos_file = st.file_uploader("Selecione o arquivo de códigos CBO (.xlsx)", type=["xlsx"])
-
-    if dados_file and codigos_file:
-        app = MercadoTrabalhoPredictor(dados_file, codigos_file)
-        app.carregar_dados()
-        app.limpar_dados()
-
-        entrada = st.text_input("🔍 Digite o nome ou código da profissão:")
-        if entrada:
-            resultados = app.buscar_profissao(entrada)
-            if not resultados.empty:
-                cbo_opcoes = resultados['cbo_codigo'].tolist()
-                cbo = st.selectbox("Selecione o código CBO para previsão:", cbo_opcoes)
-                if st.button("Gerar previsão"):
-                    app.prever_mercado(cbo)
-    else:
-        st.info("Envie os arquivos de dados para começar.")
-
-if __name__ == "__main__":
-    main()
+else:
+    st.info("Por favor, envie os dois arquivos para começar a análise.")
