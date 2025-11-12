@@ -1,228 +1,205 @@
-
-
-# app.py
-# ==========================================
-# 📊 Jobin – Analytics & Mercado Dashboard
-# ==========================================
-# Autor: [Seu Nome]
-# Descrição: Dashboard interativo em Streamlit
-# para análise e previsão do mercado de trabalho por profissão (CBO)
-# ==========================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 from sklearn.linear_model import LinearRegression
 import plotly.express as px
 import plotly.graph_objects as go
 
-# ==========================
-# Funções Utilitárias
-# ==========================
-
-def formatar_moeda(valor):
-    """Formata valor para padrão brasileiro"""
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-# ==========================
-# Classe de Processamento
-# ==========================
-
-class MercadoTrabalho:
-    def __init__(self, df, df_codigos):
-        self.df = df
-        self.df_codigos = df_codigos
-        self._identificar_colunas()
-
-    def _identificar_colunas(self):
-        for col in self.df.columns:
-            col_lower = col.lower().replace(" ", "").replace("_", "")
-            if "cbo" in col_lower and "ocupa" in col_lower:
-                self.coluna_cbo = col
-            if "competencia" in col_lower and "mov" in col_lower:
-                self.coluna_data = col
-            if "salario" in col_lower and "fixo" in col_lower:
-                self.coluna_salario = col
-
-    def filtrar_cbo(self, cbo_codigo):
-        return self.df[self.df[self.coluna_cbo].astype(str) == str(cbo_codigo)].copy()
-
-    def prever_salario(self, df_cbo, anos_futuros=[5, 10, 15, 20]):
-        df_cbo[self.coluna_data] = pd.to_datetime(df_cbo[self.coluna_data], errors="coerce")
-        df_cbo = df_cbo.dropna(subset=[self.coluna_data])
-        df_cbo["tempo_meses"] = ((df_cbo[self.coluna_data].dt.year - 2020) * 12 +
-                                 df_cbo[self.coluna_data].dt.month)
-        df_mensal = df_cbo.groupby("tempo_meses")[self.coluna_salario].mean().reset_index()
-        salario_atual = df_cbo[self.coluna_salario].mean()
-
-        if len(df_mensal) < 2:
-            return pd.DataFrame({
-                "Anos Futuro": anos_futuros,
-                "Salário Previsto": [salario_atual]*len(anos_futuros)
-            })
-
-        X = df_mensal[["tempo_meses"]]
-        y = df_mensal[self.coluna_salario]
-        model = LinearRegression()
-        model.fit(X, y)
-        ult_mes = df_mensal["tempo_meses"].max()
-
-        previsoes = []
-        for anos in anos_futuros:
-            mes_futuro = ult_mes + anos * 12
-            pred = model.predict(np.array([[mes_futuro]]))[0]
-            previsoes.append(pred)
-
-        return pd.DataFrame({
-            "Anos Futuro": anos_futuros,
-            "Salário Previsto": previsoes
-        })
-
-
-# ==========================
-# Configuração do App
-# ==========================
+# ==============================================================
+# CONFIGURAÇÕES INICIAIS DO APP
+# ==============================================================
 
 st.set_page_config(
     page_title="Jobin – Analytics & Mercado",
-    page_icon="📊",
-    layout="wide"
+    layout="wide",
+    page_icon="📊"
 )
 
 st.title("📊 Jobin – Analytics & Mercado")
-st.markdown("""
-Plataforma de **inteligência de mercado** para análise e previsão do mercado de trabalho jovem em Recife.  
-Selecione os filtros abaixo para explorar dados, tendências e previsões por profissão (CBO).
-""")
+st.markdown(
+    """
+    **Iniciativa que transforma a vida de jovens em Recife por meio de dados e inteligência de mercado.**  
+    Conectamos talentos a oportunidades reais de trabalho, educação e renda, promovendo inclusão e impacto social.
+    """
+)
 
-# ==========================
-# Upload de Dados
-# ==========================
+# ==============================================================
+# FUNÇÃO DE CARREGAMENTO DE DADOS
+# ==============================================================
 
-with st.sidebar:
-    st.header("⚙️ Configurações de Dados")
-    parquet_file = st.file_uploader("Arquivo principal (.parquet)", type=["parquet"])
-    codigos_file = st.file_uploader("Lista de códigos CBO (.xlsx)", type=["xlsx"])
+@st.cache_data
+def carregar_dados():
+    try:
+        base_path = os.path.dirname(__file__)
+        dados_path = os.path.join(base_path, "dado.parquet")
+        codigos_path = os.path.join(base_path, "codigos.xlsx")
 
-    st.markdown("---")
-    anos_futuros = st.multiselect(
-        "Períodos de previsão (anos):",
-        options=[5, 10, 15, 20],
-        default=[5, 10, 15, 20]
-    )
+        df = pd.read_parquet(dados_path)
+        df_codigos = pd.read_excel(codigos_path)
+        df_codigos.columns = ["cbo_codigo", "cbo_descricao"]
+        df_codigos["cbo_codigo"] = df_codigos["cbo_codigo"].astype(str)
+        st.success("✅ Dados carregados com sucesso!")
+        return df, df_codigos
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar os dados: {e}")
+        return None, None
 
-# ==========================
-# Processamento
-# ==========================
 
-if parquet_file and codigos_file:
-    df = pd.read_parquet(parquet_file)
-    df_codigos = pd.read_excel(codigos_file)
-    df_codigos.columns = ['cbo_codigo', 'cbo_descricao']
-    df_codigos['cbo_codigo'] = df_codigos['cbo_codigo'].astype(str)
-    mercado = MercadoTrabalho(df, df_codigos)
+df, df_codigos = carregar_dados()
 
-    cbo_nome = st.selectbox("🔎 Selecione a profissão:", df_codigos['cbo_descricao'].sort_values())
-    cbo_codigo = df_codigos[df_codigos['cbo_descricao'] == cbo_nome]['cbo_codigo'].iloc[0]
-    df_cbo = mercado.filtrar_cbo(cbo_codigo)
+if df is None or df_codigos is None:
+    st.stop()
 
-    if df_cbo.empty:
-        st.warning("Nenhum registro encontrado para essa profissão.")
+# ==============================================================
+# SEÇÃO DE FILTROS
+# ==============================================================
+
+st.sidebar.header("🔍 Filtros")
+
+profissao = st.sidebar.text_input("Digite o nome ou código CBO da profissão:")
+anos_previsao = st.sidebar.multiselect(
+    "Selecione os horizontes de previsão (anos):",
+    [5, 10, 15, 20],
+    default=[5, 10]
+)
+
+# Identificar colunas
+colunas_lower = [c.lower().replace(" ", "") for c in df.columns]
+coluna_cbo = next((c for c in df.columns if "cbo" in c.lower() and "ocupa" in c.lower()), None)
+coluna_data = next((c for c in df.columns if "competencia" in c.lower()), None)
+coluna_salario = next((c for c in df.columns if "salario" in c.lower() and "fixo" in c.lower()), None)
+
+if not all([coluna_cbo, coluna_data, coluna_salario]):
+    st.error("❌ Colunas essenciais (CBO, Data, Salário) não encontradas no dataset.")
+    st.stop()
+
+# ==============================================================
+# BUSCA E SELEÇÃO DE PROFISSÃO
+# ==============================================================
+
+if profissao:
+    resultados = df_codigos[df_codigos["cbo_descricao"].str.contains(profissao, case=False, na=False) | 
+                             df_codigos["cbo_codigo"].str.contains(profissao, case=False, na=False)]
+
+    if resultados.empty:
+        st.warning("Nenhuma profissão encontrada.")
+        st.stop()
     else:
-        st.subheader(f"📌 Profissão: {cbo_nome} ({cbo_codigo})")
+        cbo_codigo = st.sidebar.selectbox(
+            "Selecione o código CBO:",
+            resultados["cbo_codigo"],
+            format_func=lambda x: f"[{x}] " + resultados.loc[resultados["cbo_codigo"] == x, "cbo_descricao"].values[0]
+        )
 
-        # ======================
-        # Filtros adicionais
-        # ======================
-        col1, col2, col3 = st.columns(3)
+        cbo_nome = resultados.loc[resultados["cbo_codigo"] == cbo_codigo, "cbo_descricao"].values[0]
+        st.subheader(f"📌 Profissão selecionada: **{cbo_nome}**")
 
-        with col1:
-            anos = sorted(df_cbo[mercado.coluna_data].dropna().astype(str).unique())
-            ano_selec = st.multiselect("Filtrar por Competência:", anos, default=anos)
+        df_cbo = df[df[coluna_cbo].astype(str) == cbo_codigo].copy()
 
-        with col2:
-            if "uf" in df_cbo.columns:
-                estados = sorted(df_cbo["uf"].astype(str).unique())
-                uf_sel = st.multiselect("Filtrar por UF:", estados, default=estados)
-            else:
-                uf_sel = None
+        if df_cbo.empty:
+            st.warning("Nenhum registro encontrado para esta profissão.")
+            st.stop()
 
-        with col3:
-            if "sexo" in df_cbo.columns:
-                sexos = ["Masculino", "Feminino"]
-                sexo_sel = st.multiselect("Filtrar por Sexo:", sexos, default=sexos)
-            else:
-                sexo_sel = None
+        # ==============================================================
+        # ANÁLISES EXPLORATÓRIAS
+        # ==============================================================
 
-        # Aplicar filtros
-        if ano_selec:
-            df_cbo = df_cbo[df_cbo[mercado.coluna_data].astype(str).isin(ano_selec)]
-        if uf_sel:
-            df_cbo = df_cbo[df_cbo["uf"].astype(str).isin(uf_sel)]
+        st.markdown("### 📈 Análise do Mercado de Trabalho")
 
-        # ======================
-        # Métricas Gerais
-        # ======================
-        st.markdown("### 📈 Indicadores Gerais")
-        salario_medio = df_cbo[mercado.coluna_salario].mean()
-        saldo_total = df_cbo["saldomovimentacao"].sum() if "saldomovimentacao" in df_cbo.columns else np.nan
+        # SALDO DE MOVIMENTAÇÃO
+        if "saldomovimentacao" in df_cbo.columns:
+            saldo_total = df_cbo["saldomovimentacao"].sum()
+            st.metric("Saldo total de movimentação", f"{saldo_total:+,.0f}")
+            fig_saldo = px.histogram(df_cbo, x="saldomovimentacao", nbins=50, title="Distribuição do Saldo de Movimentação")
+            st.plotly_chart(fig_saldo, use_container_width=True)
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Salário médio", formatar_moeda(salario_medio))
-        col2.metric("Saldo de movimentação", f"{saldo_total:+,.0f}" if not np.isnan(saldo_total) else "N/A")
-        col3.metric("Registros analisados", f"{len(df_cbo):,}")
-
-        # ======================
-        # Gráficos
-        # ======================
-        st.markdown("### 📊 Análises e Visualizações")
-
-        tab1, tab2, tab3 = st.tabs(["💰 Salário", "📅 Tendência de Vagas", "🌎 Distribuição Geográfica"])
-
-        with tab1:
-            df_prev = mercado.prever_salario(df_cbo, anos_futuros)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df_prev["Anos Futuro"],
-                y=df_prev["Salário Previsto"],
-                mode="lines+markers",
-                name="Previsão Salarial",
-                line=dict(color="#4CAF50", width=3)
-            ))
-            fig.update_layout(
-                title="Previsão de Salário Médio por Ano",
-                xaxis_title="Anos no Futuro",
-                yaxis_title="Salário Previsto (R$)",
-                template="plotly_white"
+        # PERFIL DEMOGRÁFICO
+        col1, col2 = st.columns(2)
+        if "idade" in df_cbo.columns:
+            col1.metric("Idade média", f"{df_cbo['idade'].mean():.1f} anos")
+        if "sexo" in df_cbo.columns:
+            dist = df_cbo["sexo"].value_counts(normalize=True) * 100
+            fig_sexo = px.pie(
+                values=dist.values,
+                names=["Masculino" if str(i) == "1.0" else "Feminino" for i in dist.index],
+                title="Distribuição por Sexo"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            col2.plotly_chart(fig_sexo, use_container_width=True)
 
-        with tab2:
-            if "saldomovimentacao" in df_cbo.columns:
-                df_cbo["ano"] = pd.to_datetime(df_cbo[mercado.coluna_data], errors='coerce').dt.year
-                df_saldo = df_cbo.groupby("ano")["saldomovimentacao"].sum().reset_index()
-                fig2 = px.bar(df_saldo, x="ano", y="saldomovimentacao", title="Saldo de Vagas por Ano",
-                              labels={"saldomovimentacao": "Saldo de Vagas", "ano": "Ano"},
-                              color="saldomovimentacao", color_continuous_scale="RdYlGn")
-                st.plotly_chart(fig2, use_container_width=True)
-            else:
-                st.info("Coluna de movimentação não disponível.")
+        # ==============================================================
+        # PREVISÃO SALARIAL
+        # ==============================================================
 
-        with tab3:
-            if "uf" in df_cbo.columns:
-                df_geo = df_cbo["uf"].value_counts().reset_index()
-                df_geo.columns = ["UF", "Quantidade"]
-                fig3 = px.choropleth(
-                    df_geo,
-                    locations="UF",
-                    locationmode="ISO-3",
-                    color="Quantidade",
-                    title="Distribuição Geográfica por UF"
+        st.markdown("### 💰 Previsão Salarial")
+
+        df_cbo[coluna_data] = pd.to_datetime(df_cbo[coluna_data], errors="coerce")
+        df_cbo = df_cbo.dropna(subset=[coluna_data])
+        df_cbo["tempo_meses"] = ((df_cbo[coluna_data].dt.year - 2020) * 12 + df_cbo[coluna_data].dt.month)
+
+        df_mensal = df_cbo.groupby("tempo_meses")[coluna_salario].mean().reset_index()
+
+        if len(df_mensal) >= 2:
+            X = df_mensal[["tempo_meses"]]
+            y = df_mensal[coluna_salario]
+            model = LinearRegression()
+            model.fit(X, y)
+
+            ult_mes = df_mensal["tempo_meses"].max()
+            salario_atual = y.mean()
+
+            previsoes = []
+            for anos in anos_previsao:
+                mes_futuro = ult_mes + anos * 12
+                pred = model.predict(np.array([[mes_futuro]]))[0]
+                variacao = ((pred - salario_atual) / salario_atual) * 100
+                previsoes.append((anos, pred, variacao))
+
+            df_prev = pd.DataFrame(previsoes, columns=["Anos", "Salário Previsto", "Variação (%)"])
+
+            st.dataframe(df_prev.style.format({"Salário Previsto": "R$ {:,.2f}", "Variação (%)": "{:+.1f}%"}))
+
+            fig_prev = px.line(
+                df_prev,
+                x="Anos",
+                y="Salário Previsto",
+                markers=True,
+                title="Projeção Salarial Futura"
+            )
+            st.plotly_chart(fig_prev, use_container_width=True)
+        else:
+            st.warning("Dados insuficientes para previsão salarial.")
+
+        # ==============================================================
+        # TENDÊNCIA DO MERCADO
+        # ==============================================================
+
+        st.markdown("### 📊 Tendência do Mercado")
+
+        if "saldomovimentacao" in df_cbo.columns:
+            df_saldo = df_cbo.groupby("tempo_meses")["saldomovimentacao"].sum().reset_index()
+            if len(df_saldo) >= 2:
+                X = df_saldo[["tempo_meses"]]
+                y = df_saldo["saldomovimentacao"]
+                model_saldo = LinearRegression().fit(X, y)
+                ult_mes = df_saldo["tempo_meses"].max()
+
+                previsoes_saldo = []
+                for anos in anos_previsao:
+                    mes_futuro = ult_mes + anos * 12
+                    pred = model_saldo.predict(np.array([[mes_futuro]]))[0]
+                    previsoes_saldo.append((anos, pred))
+
+                df_tend = pd.DataFrame(previsoes_saldo, columns=["Anos", "Saldo Previsto"])
+
+                fig_tend = px.bar(
+                    df_tend,
+                    x="Anos",
+                    y="Saldo Previsto",
+                    title="Tendência de Saldo de Vagas (Projeção)"
                 )
-                st.plotly_chart(fig3, use_container_width=True)
+                st.plotly_chart(fig_tend, use_container_width=True)
             else:
-                st.info("Dados geográficos não disponíveis.")
-
+                st.info("Dados insuficientes para previsão de tendência.")
 else:
-    st.info("👈 Faça o upload dos arquivos de dados para iniciar a análise.")
+    st.info("Digite uma profissão na barra lateral para começar a análise.")
