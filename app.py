@@ -33,7 +33,7 @@ def carregar_dados():
     try:
         base_path = os.path.dirname(__file__)
         dados_path = os.path.join(base_path, "dados.parquet")
-        codigos_path = os.path.join(base_path, "codigos.xlsx")
+        codigos_path = os.path.join(base_path, "dados.parquet")
 
         df = pd.read_parquet(dados_path)
         df_codigos = pd.read_excel(codigos_path)
