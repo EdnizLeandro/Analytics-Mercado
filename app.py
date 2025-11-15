@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 import streamlit as st
+import os
 
 class MercadoTrabalhoPredictor:
     def __init__(self, csv_files: list, codigos_filepath: str):
@@ -18,12 +19,18 @@ class MercadoTrabalhoPredictor:
             return str(valor)
 
     def carregar_dados(self):
+        missing = [f for f in self.csv_files + [self.codigos_filepath] if not os.path.exists(f)]
+        if missing:
+            st.error(f"Arquivos ausentes: {', '.join(missing)}")
+            return False
+        st.info("Arquivos carregados: " + ", ".join(os.path.basename(f) for f in self.csv_files + [self.codigos_filepath]))
         dfs = [pd.read_csv(path, encoding='utf-8', sep=';', on_bad_lines='skip') for path in self.csv_files]
         self.df = pd.concat(dfs, ignore_index=True)
         self.df_codigos = pd.read_excel(self.codigos_filepath)
         self.df_codigos.columns = ['cbo_codigo', 'cbo_descricao']
         self.df_codigos['cbo_codigo'] = self.df_codigos['cbo_codigo'].astype(str)
         self.cleaned = True
+        return True
 
     def buscar_profissao(self, entrada: str) -> pd.DataFrame:
         if not self.cleaned:
@@ -77,7 +84,7 @@ class MercadoTrabalhoPredictor:
                             for uf,count in uf_dist.items()]
                 st.write("Principais UF:", ", ".join(uf_lista))
 
-        # --- Situação do Mercado de Trabalho ---
+        # Situação do Mercado de Trabalho
         st.subheader("Situação do Mercado de Trabalho")
         if saldo_col in df_cbo.columns:
             df_cbo[saldo_col] = pd.to_numeric(df_cbo[saldo_col], errors='coerce')
@@ -107,7 +114,7 @@ class MercadoTrabalhoPredictor:
         else:
             st.write("Sem dados de saldo de movimentação para esta profissão.")
 
-        # --- PREVISÃO SALARIAL ---
+        # PREVISÃO SALARIAL
         st.subheader("Previsão Salarial (próximos anos)")
         df_cbo[col_salario] = pd.to_numeric(df_cbo[col_salario].astype(str).str.replace(",",".").str.replace(" ",""), errors="coerce")
         df_cbo = df_cbo.dropna(subset=[col_salario])
@@ -139,14 +146,23 @@ st.set_page_config(page_title="Previsão Mercado de Trabalho", layout="wide")
 st.title("📊 Previsão do Mercado de Trabalho (CAGED/CBO)")
 
 csv_files = [
-    "2020_PE1.csv","2021_PE1.csv","2022_PE1.csv","2023_PE1.csv","2024_PE1.csv","2025_PE1.csv"
+    "2020_PE1.csv",
+    "2021_PE1.csv",
+    "2022_PE1.csv",
+    "2023_PE1.csv",
+    "2024_PE1.csv",
+    "2025_PE1.csv"
 ]
 codigos_filepath = "cbo.xlsx"
-with st.spinner("Carregando dados..."):
-    app = MercadoTrabalhoPredictor(csv_files, codigos_filepath)
-    app.carregar_dados()
 
-st.success("Dados prontos!")
+with st.spinner("Verificando e carregando arquivos..."):
+    app = MercadoTrabalhoPredictor(csv_files, codigos_filepath)
+    arquivos_ok = app.carregar_dados()
+
+if not arquivos_ok:
+    st.stop()
+else:
+    st.success("Dados prontos!")
 
 busca = st.text_input("Digite o nome ou código da profissão:")
 if busca:
