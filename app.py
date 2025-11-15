@@ -1,423 +1,253 @@
-# app.py — Plataforma Jovem Futuro — Mostra somente o MELHOR modelo (RMSE)
-import os
-import math
-import io
-import warnings
-import numpy as np
 import pandas as pd
-import streamlit as st
-import plotly.graph_objects as go
-import plotly.express as px
+import numpy as np
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+import math
+import streamlit as st
 
-# Suppress warnings in UI
-warnings.filterwarnings("ignore")
-os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
-os.environ.setdefault('CMDSTAN_LOG_LEVEL', 'ERROR')
+class MercadoTrabalhoPredictor:
+    def __init__(self, csv_files: list, codigos_filepath: str):
+        self.csv_files = csv_files
+        self.codigos_filepath = codigos_filepath
+        self.df = None
+        self.df_codigos = None
+        self.cleaned = False
 
-# Optional imports — safe
-try:
-    from prophet import Prophet
-    HAS_PROPHET = True
-except Exception:
-    HAS_PROPHET = False
-
-try:
-    from statsmodels.tsa.arima.model import ARIMA
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    HAS_STATSMODELS = True
-except Exception:
-    HAS_STATSMODELS = False
-
-try:
-    from xgboost import XGBRegressor
-    HAS_XGBOOST = True
-except Exception:
-    HAS_XGBOOST = False
-
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    HAS_TF = True
-except Exception:
-    HAS_TF = False
-
-st.set_page_config(page_title="Plataforma Jovem Futuro — Melhor Modelo (RMSE)", layout="wide")
-st.title("🔎 Previsões do Mercado de Trabalho — Jovem Futuro")
-
-# Files expected
-PARQUET_FILE = "dados.parquet"
-CBO_FILE = "cbo.xlsx"
-
-# -------------------------
-# Helpers
-# -------------------------
-def format_brl(x):
-    try:
-        s = f"{float(x):,.2f}"
-        s = s.replace(",", "X").replace(".", ",").replace("X", ".")
-        return f"R$ {s}"
-    except:
-        return str(x)
-
-def safe_rmse(y_true, y_pred):
-    try:
-        if len(y_true) == 0 or len(y_pred) == 0:
-            return float('inf')
-        # align lengths
-        n = min(len(y_true), len(y_pred))
-        return math.sqrt(mean_squared_error(y_true[:n], y_pred[:n]))
-    except:
-        return float('inf')
-
-def find_col(df, keywords):
-    for c in df.columns:
-        low = c.lower().replace(" ", "").replace("_","")
-        for k in keywords:
-            if k in low:
-                return c
-    return None
-
-def parse_competencia(col):
-    s = col.astype(str).str.strip().str.replace(r'\D','', regex=True)
-    def _p(v):
-        if v is None or v=='' or v.lower()=='nan':
-            return pd.NaT
-        if len(v)==6:
-            return pd.to_datetime(v, format='%Y%m', errors='coerce')
-        if len(v)==8:
-            return pd.to_datetime(v, format='%Y%m%d', errors='coerce')
+    def formatar_moeda(self, valor):
         try:
-            return pd.to_datetime(v, errors='coerce')
-        except:
-            return pd.NaT
-    return s.apply(_p)
+            return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            return str(valor)
 
-def fix_salary_col(s):
-    s = s.astype(str).str.strip()
-    s = s.str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-    s = pd.to_numeric(s, errors='coerce')
-    s.loc[s < 0] = np.nan
-    s.loc[s > 1_000_000] = np.nan
-    med = s.median()
-    if np.isnan(med):
-        med = 0.0
-    s = s.fillna(med)
-    return s
+    def carregar_dados(self):
+        dfs = []
+        for path in self.csv_files:
+            df_temp = pd.read_csv(path, encoding='utf-8', sep=';', on_bad_lines='skip')
+            dfs.append(df_temp)
 
-def create_lag_df(series, lags=12):
-    df_l = pd.DataFrame({'y':series})
-    for i in range(1,lags+1):
-        df_l[f'lag_{i}'] = df_l['y'].shift(i)
-    return df_l.dropna()
+        self.df = pd.concat(dfs, ignore_index=True)
 
-# -------------------------
-# Load data (cached)
-# -------------------------
-@st.cache_resource
-def load_data():
-    if not os.path.exists(PARQUET_FILE):
-        return None, "PARQUET_MISSING"
-    if not os.path.exists(CBO_FILE):
-        return None, "CBO_MISSING"
-    try:
-        df = pd.read_parquet(PARQUET_FILE)
-    except Exception:
-        return None, "PARQUET_INVALID"
-    try:
-        cbo = pd.read_excel(CBO_FILE)
-    except Exception:
-        return None, "CBO_INVALID"
-    return (df, cbo), None
+        # Carrega tabela CBO
+        self.df_codigos = pd.read_excel(self.codigos_filepath)
+        self.df_codigos.columns = ['cbo_codigo', 'cbo_descricao']
+        self.df_codigos['cbo_codigo'] = self.df_codigos['cbo_codigo'].astype(str)
 
-loaded, err = load_data()
-if err:
-    if err == "PARQUET_MISSING":
-        st.error("Arquivo necessário ausente: dados.parquet")
-    elif err == "CBO_MISSING":
-        st.error("Arquivo necessário ausente: cbo.xlsx")
+        self.cleaned = True
+
+    def buscar_profissao(self, entrada: str) -> pd.DataFrame:
+        if not self.cleaned:
+            return pd.DataFrame()
+
+        if entrada.isdigit():
+            return self.df_codigos[self.df_codigos['cbo_codigo'] == entrada]
+
+        mask = self.df_codigos['cbo_descricao'].str.contains(entrada, case=False, na=False)
+        return self.df_codigos[mask]
+
+    def relatorio_previsao(self, cbo_codigo, anos_futuros=[5,10,15,20]):
+        df = self.df
+        col_cbo = "cbo2002ocupação"
+        col_data = "competênciamov"
+        col_salario = "salário"
+
+        # Nome da profissão
+        prof_info = self.df_codigos[self.df_codigos['cbo_codigo'] == cbo_codigo]
+        st.subheader(f"Profissão: {prof_info.iloc[0]['cbo_descricao']}" if not prof_info.empty else f"CBO: {cbo_codigo}")
+
+        # Filtragem
+        df_cbo = df[df[col_cbo].astype(str) == cbo_codigo].copy()
+        if df_cbo.empty:
+            st.warning("Nenhum registro encontrado para essa profissão.")
+            return
+
+        st.write(f"**Registros encontrados:** {len(df_cbo):,}")
+
+        # -------- DEMOGRAFIA --------
+        with st.expander("Perfil Demográfico"):
+            # idade
+            if 'idade' in df_cbo.columns:
+                idade = pd.to_numeric(df_cbo['idade'], errors='coerce')
+                st.write(f"Idade média: {idade.mean():.1f} anos")
+
+            # sexo
+            if 'sexo' in df_cbo.columns:
+                sexo_dist = df_cbo['sexo'].value_counts()
+                sexo_map = {'1': 'Masculino', '3': 'Feminino'}
+                sexo_lista = [
+                    f"{sexo_map.get(str(k), str(k))}: {(v/len(df_cbo))*100:.1f}%"
+                    for k, v in sexo_dist.items()
+                ]
+                st.write("Distribuição por sexo: " + ", ".join(sexo_lista))
+
+            # escolaridade
+            if 'graudeinstrucao' in df_cbo.columns:
+                esc_map = {
+                    '1': 'Analfabeto','2': 'Até 5ª inc. Fund.','3': '5ª comp. Fund.',
+                    '4': '6ª a 9ª Fund.','5': 'Fund. completo','6': 'Médio incompleto',
+                    '7': 'Médio completo','8': 'Superior incompleto','9': 'Superior completo',
+                    '10': 'Mestrado','11': 'Doutorado','80': 'Pós-graduação'
+                }
+                esc = df_cbo['graudeinstrucao'].value_counts().head(3)
+                esc_txt = [
+                    f"{esc_map.get(str(int(float(k))), k)}: {(v/len(df_cbo))*100:.1f}%"
+                    for k, v in esc.items()
+                ]
+                st.write("Principais níveis: " + ", ".join(esc_txt))
+
+        # -------- MERCADO ATUAL --------
+        st.subheader("Situação do Mercado de Trabalho")
+
+        saldo_col = "saldomovimentação"
+        if saldo_col in df_cbo.columns:
+            saldo_total = pd.to_numeric(df_cbo[saldo_col], errors='coerce').sum()
+
+            if saldo_total > 0:
+                status = "EXPANSÃO"
+            elif saldo_total < 0:
+                status = "RETRAÇÃO"
+            else:
+                status = "ESTABILIDADE"
+
+            st.write(f"Saldo total: {saldo_total:+,.0f}  → **{status}**")
+
+        # -------- PREVISÃO SALARIAL --------
+        st.subheader("Previsão Salarial (5, 10, 15 e 20 anos)")
+
+        # limpa salário
+        df_cbo[col_salario] = (
+            df_cbo[col_salario]
+            .astype(str)
+            .str.replace(",", ".")
+            .str.replace(" ", "")
+        )
+
+        df_cbo[col_salario] = pd.to_numeric(df_cbo[col_salario], errors="coerce")
+
+        # Preenche faltantes com mediana
+        mediana_salario = df_cbo[col_salario].median()
+        df_cbo[col_salario].fillna(mediana_salario, inplace=True)
+
+        # Datas
+        df_cbo[col_data] = pd.to_datetime(df_cbo[col_data], errors='coerce')
+        df_cbo = df_cbo.dropna(subset=[col_data])
+
+        df_cbo['tempo_meses'] = (
+            (df_cbo[col_data].dt.year - 2020) * 12 +
+            df_cbo[col_data].dt.month
+        )
+
+        # Série mensal
+        df_mensal = df_cbo.groupby("tempo_meses")[col_salario].mean().reset_index()
+
+        salario_atual = df_mensal[col_salario].iloc[-1]
+        st.write(f"Salário médio atual: **R$ {self.formatar_moeda(salario_atual)}**")
+
+        # ---- RMSE ----
+        if len(df_mensal) >= 3:
+            X = df_mensal[['tempo_meses']]
+            y = df_mensal[col_salario]
+
+            model = LinearRegression().fit(X, y)
+            y_pred = model.predict(X)
+
+            rmse = math.sqrt(mean_squared_error(y, y_pred))
+            st.write(f"**RMSE do modelo (qualidade): R$ {self.formatar_moeda(rmse)}**")
+        else:
+            st.info("Sem dados suficientes para calcular RMSE.")
+            return
+
+        # Previsão futura
+        ult_mes = df_mensal["tempo_meses"].max()
+        previsoes = []
+
+        for anos in anos_futuros:
+            mes_futuro = ult_mes + anos * 12
+            pred = model.predict(np.array([[mes_futuro]]))[0]
+            variacao = ((pred - salario_atual) / salario_atual) * 100
+
+            previsoes.append([
+                anos,
+                f"R$ {self.formatar_moeda(pred)}",
+                f"{variacao:+.1f}%"
+            ])
+
+        st.table(pd.DataFrame(
+            previsoes,
+            columns=["Anos", "Salário Previsto", "Variação (%)"]
+        ))
+
+        # -------- PREVISÃO DE VAGAS --------
+        st.subheader("Tendência de Vagas")
+
+        if saldo_col in df_cbo.columns:
+            df_saldo = (
+                df_cbo.groupby("tempo_meses")[saldo_col]
+                .sum()
+                .reset_index()
+            )
+
+            if len(df_saldo) >= 3:
+                Xs = df_saldo[['tempo_meses']]
+                ys = df_saldo[saldo_col]
+
+                mod = LinearRegression().fit(Xs, ys)
+
+                ult_mes_saldo = df_saldo["tempo_meses"].max()
+                tendencias = []
+
+                for anos in anos_futuros:
+                    mes_fut = ult_mes_saldo + anos * 12
+                    pred_saldo = mod.predict(np.array([[mes_fut]]))[0]
+
+                    if pred_saldo > 100: status = "ALTA DEMANDA"
+                    elif pred_saldo > 50: status = "CRESCIMENTO MODERADO"
+                    elif pred_saldo > 0: status = "CRESCIMENTO LEVE"
+                    elif pred_saldo > -50: status = "RETRAÇÃO LEVE"
+                    elif pred_saldo > -100: status = "RETRAÇÃO MODERADA"
+                    else: status = "RETRAÇÃO FORTE"
+
+                    tendencias.append([
+                        anos,
+                        f"{pred_saldo:+,.0f}",
+                        status
+                    ])
+
+                st.table(pd.DataFrame(
+                    tendencias,
+                    columns=["Anos", "Vagas Previstas/mês", "Tendência"]
+                ))
+            else:
+                st.info("Histórico insuficiente para prever vagas.")
+
+# ------------------- STREAMLIT APP -------------------
+st.set_page_config(page_title="Previsão Mercado de Trabalho", layout="wide")
+st.title("📊 Previsões do Mercado de Trabalho — Jovem Futuro")
+
+csv_files = [
+    "2020_PE1.csv","2021_PE1.csv","2022_PE1.csv",
+    "2023_PE1.csv","2024_PE1.csv","2025_PE1.csv"
+]
+
+codigos_filepath = "cbo.xlsx"
+
+with st.spinner("Carregando dados..."):
+    app = MercadoTrabalhoPredictor(csv_files, codigos_filepath)
+    app.carregar_dados()
+
+st.success("Dados carregados com sucesso!")
+
+busca = st.text_input("Digite o nome ou código da profissão:")
+
+if busca:
+    resultados = app.buscar_profissao(busca)
+    if resultados.empty:
+        st.warning("Nenhuma profissão encontrada.")
     else:
-        st.error("Erro lendo arquivos. Verifique os arquivos.")
-    st.stop()
+        cbo_opcao = st.selectbox(
+            "Selecione o CBO:",
+            resultados['cbo_codigo'] + " - " + resultados['cbo_descricao']
+        )
+        cbo_codigo = cbo_opcao.split(" - ")[0]
 
-df, df_cbo = loaded
-
-# Don't show raw data or column lists anywhere (requirement)
-# --------------------------------
-# Detect columns robustly
-col_cbo = find_col(df, ['cbo','ocupacao','ocupação'])
-col_date = find_col(df, ['competencia','competenciamov','competenciadec','data'])
-col_salary = find_col(df, ['salario','valorsalario','remuneracao'])
-col_saldo = find_col(df, ['saldomovimentacao','saldomovimentação','saldo'])
-
-if not all([col_cbo, col_date, col_salary, col_saldo]):
-    st.error("Não foi possível identificar automaticamente todas as colunas necessárias no dataset. Certifique-se que o arquivo contém colunas de: CBO, competência (data), salário, saldomovimentacao.")
-    st.stop()
-
-# Parse dates robustly
-df[col_date] = parse_competencia(df[col_date])
-df = df.dropna(subset=[col_date]).copy()
-
-# Fix salary
-df[col_salary] = fix_salary_col(df[col_salary])
-
-# Prepare CBO sheet: detect code & description columns
-df_cbo.columns = [str(c).strip() for c in df_cbo.columns]
-cbo_code_col = next((c for c in df_cbo.columns if 'cod' in c.lower()), df_cbo.columns[0])
-cbo_desc_col = next((c for c in df_cbo.columns if 'descr' in c.lower() or 'nome' in c.lower() or 'titulo' in c.lower()), df_cbo.columns[1] if len(df_cbo.columns)>1 else df_cbo.columns[0])
-df_cbo = df_cbo.rename(columns={cbo_code_col:'codigo', cbo_desc_col:'descricao'})
-df_cbo['codigo'] = df_cbo['codigo'].astype(str)
-
-# -------------------------
-# UI: minimal inputs
-# -------------------------
-query = st.text_input("Digite nome ou código da profissão:", "")
-if not query:
-    st.info("Digite o nome (ex: pintor) ou código CBO para ver previsão.")
-    st.stop()
-
-# search CBO
-c_mask = df_cbo['descricao'].astype(str).str.contains(query, case=False, na=False) | df_cbo['codigo'].astype(str).str.contains(query, na=False)
-candidates = df_cbo[c_mask]
-if candidates.empty:
-    st.warning("Nenhuma profissão encontrada.")
-    st.stop()
-
-# if many candidates, show selectbox of codes (no table)
-chosen_code = st.selectbox("Selecione o CBO", options=candidates['codigo'].astype(str).unique())
-if not chosen_code:
-    st.stop()
-
-# subset job
-df_job = df[df[col_cbo].astype(str)==str(chosen_code)].copy()
-if df_job.empty:
-    st.warning("Não há registros para o CBO selecionado.")
-    st.stop()
-
-# aggregate monthly by mean of saldomovimentacao
-ts = df_job.set_index(col_date).resample('M')[col_saldo].mean().ffill().reset_index().rename(columns={col_date:'ds', col_saldo:'y'})
-
-if ts['ds'].isnull().all() or len(ts) < 6:
-    st.warning("Série temporal insuficiente para modelagem. Precisa de ao menos alguns meses de dados.")
-    st.stop()
-
-# Show simple historical plot (no tables)
-fig_hist = px.line(ts, x='ds', y='y', title='Histórico de saldo médio mensal')
-st.plotly_chart(fig_hist, use_container_width=True)
-
-# Forecast horizon selection
-horizon = st.selectbox("Horizonte (meses) para previsão:", options=[6,12,24], index=1)
-
-# train/test split heuristic: last min(6, horizon//6) months as test
-test_months = min(6, max(1, horizon//6))
-train = ts[:-test_months] if len(ts) > test_months else ts
-test = ts[-test_months:] if len(ts) >= test_months else ts.copy()
-
-y_train = train['y'].values
-y_test = test['y'].values
-
-# container for results
-results = {}
-
-# 1) Linear reg on time index
-try:
-    X_tr = np.arange(len(train)).reshape(-1,1)
-    X_te = np.arange(len(train), len(train)+len(test)).reshape(-1,1)
-    lr = LinearRegression().fit(X_tr, y_train)
-    pred_test = lr.predict(X_te) if len(X_te)>0 else np.array([])
-    pred_full = lr.predict(np.arange(len(ts), len(ts)+horizon).reshape(-1,1))
-    results['Linear'] = {
-        'pred_test': np.array(pred_test),
-        'pred_full': np.array(pred_full),
-        'rmse': safe_rmse(y_test, np.array(pred_test)),
-        'mae': mean_absolute_error(y_test, np.array(pred_test)) if len(y_test)>0 else float('inf'),
-        'r2': r2_score(y_test, np.array(pred_test)) if len(y_test)>0 else float('-inf')
-    }
-except Exception:
-    results['Linear'] = None
-
-# 2) Prophet
-if HAS_PROPHET:
-    try:
-        dfp = ts.rename(columns={'ds':'ds','y':'y'})
-        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-        m.fit(dfp.iloc[:len(train)])
-        fut_test = m.make_future_dataframe(periods=len(test), freq='M')
-        fc_test = m.predict(fut_test)
-        pred_test = fc_test['yhat'].iloc[-len(test):].values if len(test)>0 else np.array([])
-        fut_full = m.make_future_dataframe(periods=horizon, freq='M')
-        fc_full = m.predict(fut_full)
-        pred_full = fc_full['yhat'].iloc[-horizon:].values
-        results['Prophet'] = {
-            'pred_test': np.array(pred_test),
-            'pred_full': np.array(pred_full),
-            'rmse': safe_rmse(y_test, np.array(pred_test)),
-            'mae': mean_absolute_error(y_test, np.array(pred_test)) if len(y_test)>0 else float('inf'),
-            'r2': r2_score(y_test, np.array(pred_test)) if len(y_test)>0 else float('-inf'),
-            'model': m,
-            'forecast_full': fc_full
-        }
-    except Exception:
-        results['Prophet'] = None
-else:
-    results['Prophet'] = None
-
-# 3) ARIMA / SARIMA
-if HAS_STATSMODELS:
-    try:
-        arima = ARIMA(y_train, order=(1,1,1)).fit()
-        pred_test = arima.forecast(steps=len(test)) if len(test)>0 else np.array([])
-        pred_full = arima.forecast(steps=horizon)
-        results['ARIMA'] = {
-            'pred_test': np.array(pred_test),
-            'pred_full': np.array(pred_full),
-            'rmse': safe_rmse(y_test, np.array(pred_test)),
-            'mae': mean_absolute_error(y_test, np.array(pred_test)) if len(y_test)>0 else float('inf'),
-            'r2': r2_score(y_test, np.array(pred_test)) if len(y_test)>0 else float('-inf'),
-            'model': arima
-        }
-    except Exception:
-        results['ARIMA'] = None
-else:
-    results['ARIMA'] = None
-
-# 4) XGBoost with lags
-if HAS_XGBOOST:
-    try:
-        lags = min(12, max(3, len(ts)//6))
-        df_lag = create_lag_df(ts['y'].values, lags=lags)
-        X = df_lag.drop(columns='y').values; y = df_lag['y'].values
-        if len(X) > 0:
-            split = int(0.8*len(X))
-            X_tr, X_val = X[:split], X[split:]
-            y_tr, y_val = y[:split], y[split:]
-            xgb = XGBRegressor(n_estimators=200, verbosity=0)
-            xgb.fit(X_tr, y_tr)
-            # test preds: rolling
-            preds_test = []
-            last = ts['y'].values[-lags:].tolist()
-            for _ in range(len(test)):
-                arr = np.array(last[-lags:]).reshape(1,-1)
-                p = float(xgb.predict(arr)[0])
-                preds_test.append(p); last.append(p)
-            # full future
-            last2 = ts['y'].values[-lags:].tolist()
-            preds_full = []
-            for _ in range(horizon):
-                arr = np.array(last2[-lags:]).reshape(1,-1)
-                p = float(xgb.predict(arr)[0])
-                preds_full.append(p); last2.append(p)
-            results['XGBoost'] = {
-                'pred_test': np.array(preds_test),
-                'pred_full': np.array(preds_full),
-                'rmse': safe_rmse(y_test, np.array(preds_test)),
-                'mae': mean_absolute_error(y_test, np.array(preds_test)) if len(y_test)>0 else float('inf'),
-                'r2': r2_score(y_test, np.array(preds_test)) if len(y_test)>0 else float('-inf'),
-                'model': xgb
-            }
-        else:
-            results['XGBoost'] = None
-    except Exception:
-        results['XGBoost'] = None
-else:
-    results['XGBoost'] = None
-
-# 5) LSTM (small) if TF available
-if HAS_TF:
-    try:
-        window = min(6, max(3, len(ts)//12))
-        arr = ts['y'].values
-        Xs, ys = [], []
-        for i in range(window, len(arr)):
-            Xs.append(arr[i-window:i]); ys.append(arr[i])
-        Xs = np.array(Xs); ys = np.array(ys)
-        if len(Xs) > 10:
-            minv, maxv = Xs.min(), Xs.max()
-            scale = maxv-minv if maxv!=minv else 1.0
-            Xs_s = (Xs-minv)/scale; ys_s = (ys-minv)/scale
-            Xs_s = Xs_s.reshape((Xs_s.shape[0], Xs_s.shape[1], 1))
-            tf.keras.backend.clear_session()
-            model_l = Sequential()
-            model_l.add(LSTM(32, input_shape=(Xs_s.shape[1],1)))
-            model_l.add(Dropout(0.2))
-            model_l.add(Dense(1))
-            model_l.compile(optimizer='adam', loss='mse')
-            model_l.fit(Xs_s, ys_s, epochs=15, batch_size=8, verbose=0)
-            # test preds
-            preds_test = []
-            last_window = arr[-(window+len(test)):-len(test)] if len(test)>0 else arr[-window:]
-            last = arr[-window:].tolist()
-            for _ in range(len(test)):
-                arr_in = (np.array(last[-window:]) - minv)/scale
-                p = model_l.predict(arr_in.reshape(1,window,1), verbose=0)[0][0]
-                p = p*scale + minv; preds_test.append(p); last.append(p)
-            # full future
-            last2 = arr[-window:].tolist(); preds_full = []
-            for _ in range(horizon):
-                arr_in = (np.array(last2[-window:]) - minv)/scale
-                p = model_l.predict(arr_in.reshape(1,window,1), verbose=0)[0][0]
-                p = p*scale + minv; preds_full.append(p); last2.append(p)
-            results['LSTM'] = {
-                'pred_test': np.array(preds_test),
-                'pred_full': np.array(preds_full),
-                'rmse': safe_rmse(y_test, np.array(preds_test)),
-                'mae': mean_absolute_error(y_test, np.array(preds_test)) if len(y_test)>0 else float('inf'),
-                'r2': r2_score(y_test, np.array(preds_test)) if len(y_test)>0 else float('-inf'),
-                'model': model_l
-            }
-        else:
-            results['LSTM'] = None
-    except Exception:
-        results['LSTM'] = None
-else:
-    results['LSTM'] = None
-
-# Filter executed models
-executed = {k:v for k,v in results.items() if v is not None}
-if len(executed)==0:
-    st.error("Nenhum modelo foi executado com sucesso. Verifique dependências.")
-    st.stop()
-
-# Build metrics table (internal only) and pick by RMSE
-metrics = []
-for name, r in executed.items():
-    metrics.append({'model':name, 'rmse': float(r['rmse']), 'mae': float(r['mae']), 'r2': float(r['r2'])})
-metrics_df = pd.DataFrame(metrics).sort_values('rmse').reset_index(drop=True)
-best_name = metrics_df.loc[0,'model']
-best = executed[best_name]
-
-# Show only minimal outputs
-st.markdown(f"### 🏆 Melhor modelo (critério = RMSE): **{best_name}**")
-st.markdown(f"- RMSE: **{metrics_df.loc[0,'rmse']:.2f}**  •  MAE: **{metrics_df.loc[0,'mae']:.2f}**  •  R²: **{metrics_df.loc[0,'r2']:.3f}**")
-
-# Plot predicted test vs real and future forecast for best model
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=train['ds'], y=train['y'], mode='lines', name='Histórico (treino)'))
-if len(test)>0:
-    fig.add_trace(go.Scatter(x=test['ds'], y=test['y'], mode='markers+lines', name='Real (teste)'))
-if 'pred_test' in best and len(best['pred_test'])>0:
-    # align x for pred_test -> use ds_test
-    fig.add_trace(go.Scatter(x=test['ds'], y=best['pred_test'][:len(test)], mode='lines+markers', name=f'Previsto (teste) — {best_name}'))
-# future dates
-last_date = ts['ds'].max()
-future_dates = pd.date_range(last_date + pd.offsets.MonthBegin(1), periods=horizon, freq='M')
-fig.add_trace(go.Scatter(x=future_dates, y=best['pred_full'] if 'pred_full' in best else best['pred_full_future'], mode='lines+markers', name=f'Forecast {horizon}m — {best_name}', line=dict(dash='dash')))
-fig.update_layout(title=f"Melhor modelo: {best_name} — Previsão ({horizon} meses)", xaxis_title='Data', yaxis_title='Saldo médio')
-st.plotly_chart(fig, use_container_width=True)
-
-# Prepare numeric forecast for download (formatted)
-forecast_vals = best.get('pred_full') if 'pred_full' in best else best.get('pred_full_future')
-if forecast_vals is None:
-    # try other keys
-    forecast_vals = best.get('pred_full_future', np.zeros(horizon))
-forecast_vals = np.array(forecast_vals).astype(float)
-df_download = pd.DataFrame({'date': future_dates, 'forecast': forecast_vals})
-# no large displays; provide download
-csv = df_download.to_csv(index=False).encode('utf-8')
-st.download_button("📥 Baixar forecast (CSV)", data=csv, file_name=f"forecast_{chosen_code}_{best_name}.csv", mime="text/csv")
-
-st.success("Previsão gerada com sucesso.")
+        if st.button("Gerar Análise Completa"):
+            app.relatorio_previsao(cbo_codigo, anos_futuros=[5,10,15,20])
