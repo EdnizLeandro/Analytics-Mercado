@@ -7,3 +7,4 @@ openpyxl
 statsmodels
 prophet
 xgboost
+tensorflow
