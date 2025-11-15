@@ -49,6 +49,7 @@ class MercadoTrabalhoPredictor:
             return
 
         st.write(f"**Registros encontrados:** {len(df_cbo):,}")
+
         # --- Perfil Demográfico ---
         with st.expander("👥 Perfil Demográfico"):
             left, right = st.columns(2)
@@ -58,9 +59,7 @@ class MercadoTrabalhoPredictor:
             if 'sexo' in df_cbo.columns:
                 sexo_dist = df_cbo['sexo'].value_counts()
                 sexo_map = {'1.0':'Masculino','3.0':'Feminino','1':'Masculino','3':'Feminino'}
-                sex_labels = [sexo_map.get(str(sex),str(sex)) for sex in sexo_dist.keys()]
                 right.bar_chart(sexo_dist.rename(index=sexo_map))
-            row = ""
             if 'graudeinstrucao' in df_cbo.columns:
                 escolaridade = df_cbo['graudeinstrucao'].value_counts().head(3)
                 escolaridade_map = {
@@ -137,43 +136,6 @@ class MercadoTrabalhoPredictor:
             plt.close()
         else:
             st.info("Previsão baseada apenas na média atual.")
-
-        # --- PREVISÃO DE TENDÊNCIA DE VAGAS ---
-        st.markdown("---")
-        st.subheader("📈 Tendência de Vagas (5, 10, 15, 20 anos)")
-        if saldo_col in df_cbo.columns:
-            df_saldo_mensal = df_cbo.groupby('tempo_meses')[saldo_col].sum().reset_index()
-            col1, col2 = st.columns([2,3])
-            if len(df_saldo_mensal) >= 2:
-                X_saldo = df_saldo_mensal[['tempo_meses']]
-                y_saldo = df_saldo_mensal[saldo_col]
-                mod = LinearRegression().fit(X_saldo, y_saldo)
-                ult_mes = df_saldo_mensal['tempo_meses'].max()
-                tendencias, pred_vals, anos_grafico = [], [], []
-                for anos in anos_futuros:
-                    mes_futuro = ult_mes + anos*12
-                    pred = mod.predict(np.array([[mes_futuro]]))[0]
-                    if pred > 100: status = "ALTA DEMANDA"
-                    elif pred > 50: status = "CRESCIMENTO MODERADO"
-                    elif pred > 0: status = "CRESCIMENTO LEVE"
-                    elif pred > -50: status = "RETRAÇÃO LEVE"
-                    elif pred > -100: status = "RETRAÇÃO MODERADA"
-                    else: status = "RETRAÇÃO FORTE"
-                    tendencias.append((anos, f"{pred:+,.0f}", status))
-                    pred_vals.append(pred)
-                    anos_grafico.append(str(anos)+' anos')
-                col1.table(pd.DataFrame(tendencias,columns=["Anos","Vagas Previstas/mês","Tendência"]))
-
-                # Gráfico barras
-                fig, ax = plt.subplots(figsize=(5,3))
-                ax.bar(anos_grafico, pred_vals, color='#31708E')
-                ax.set_xlabel("Anos à frente")
-                ax.set_ylabel("Saldo previsto (vagas/mês)")
-                ax.set_title("Tendência de vagas (saldo previsto)")
-                col2.pyplot(fig)
-                plt.close()
-            else:
-                st.info("Sem histórico mensal suficiente para previsão.")
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Previsão Mercado de Trabalho", layout="wide")
