@@ -1,388 +1,166 @@
-"""
-Streamlit App — Plataforma Jovem Futuro (versão robusta)
-- Carrega dados CAGED (parquet) + códigos CBO (xlsx)
-- Visualizações interativas (Plotly)
-- Previsões por vários modelos (Prophet, ARIMA, XGBoost com lags, LSTM opcional)
-- Modular, com caching, tratamento de erros e proteção contra problemas de DOM
-"""
+# ============================================================
+#  EPIDEMIOLOGIA COVID-19 – MODELOS SIR/SEIR + MACHINE LEARNING
+#  Autor: (Seu Nome)
+#  Data: 2025
+# ============================================================
 
-import os
-import math
+# ----------------------
+# IMPORTAÇÕES
+# ----------------------
 import pandas as pd
 import numpy as np
-import streamlit as st
-from typing import Optional, Dict, Any
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_absolute_error
+import matplotlib.pyplot as plt
+from scipy.integrate import odeint
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, r2_score
 
-# Optional libraries - import in try blocks (app works without some)
-try:
-    from prophet import Prophet
-    HAS_PROPHET = True
-except Exception:
-    HAS_PROPHET = False
+# ----------------------
+# CONFIGURAÇÕES DE GRÁFICO
+# ----------------------
+plt.rcParams["figure.figsize"] = (12, 6)
+plt.rcParams["font.size"] = 12
 
-try:
-    from xgboost import XGBRegressor
-    HAS_XGBOOST = True
-except Exception:
-    HAS_XGBOOST = False
+# ----------------------
+# 1. LEITURA DO ARQUIVO PARQUET
+# ----------------------
+file_path = "dados_tratados.parquet"   # altere aqui
 
-try:
-    import statsmodels.api as sm
-    from statsmodels.tsa.arima.model import ARIMA
-    HAS_ARIMA = True
-except Exception:
-    HAS_ARIMA = False
+print("📂 Carregando dados...")
+df = pd.read_parquet(file_path)
 
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense
-    HAS_TF = True
-except Exception:
-    HAS_TF = False
+print("Colunas encontradas:")
+print(df.columns)
 
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    HAS_PLOTLY = True
-except Exception:
-    HAS_PLOTLY = False
+# ----------------------
+# 2. PRÉ–PROCESSAMENTO E FILTRAGEM (2020–2024)
+# ----------------------
+df["data"] = pd.to_datetime(df["data"])
+df = df.sort_values("data")
 
-# ---------------------------
-# CONFIG
-# ---------------------------
-st.set_page_config(page_title="Plataforma Jovem Futuro — Previsões", layout="wide")
-st.title("📊 Plataforma Jovem Futuro — Previsões do Mercado de Trabalho")
+df_periodo = df[(df["data"].dt.year >= 2020) & (df["data"].dt.year <= 2024)]
 
-# ---------------------------
-# UTILIDADES e CACHING
-# ---------------------------
+# Exemplo: analisar o Brasil inteiro (soma por dia)
+df_br = df_periodo.groupby("data").agg({
+    "casosnovos": "sum",
+    "obitosnovos": "sum",
+    "populacaotcu2019": "sum"
+}).reset_index()
 
-@st.cache_data(ttl=60*60)
-def safe_read_parquet(path: str) -> pd.DataFrame:
-    return pd.read_parquet(path)
+df_br["infectados"] = df_br["casosnovos"].cumsum()
+df_br["recuperados"] = df_br["infectados"] * 0.92
+df_br["susceptiveis"] = df_br["populacaotcu2019"] - df_br["infectados"]
 
-@st.cache_data(ttl=60*60)
-def safe_read_excel(path: str) -> pd.DataFrame:
-    return pd.read_excel(path)
+# ----------------------
+# 3. MODELO SIR
+# ----------------------
 
-def format_brl(x):
-    try:
-        return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return str(x)
+def sir_model(y, t, beta, gamma, N):
+    S, I, R = y
+    dSdt = -beta * S * I / N
+    dIdt = beta * S * I / N - gamma * I
+    dRdt = gamma * I
+    return [dSdt, dIdt, dRdt]
 
-def find_column(df: pd.DataFrame, candidates: list) -> Optional[str]:
-    cols = [c.lower().replace(" ", "").replace("_", "") for c in df.columns]
-    for cand in candidates:
-        for i, c in enumerate(cols):
-            if cand.lower().replace(" ", "").replace("_", "") in c:
-                return df.columns[i]
-    return None
+# Valores iniciais
+N = df_br["populacaotcu2019"].iloc[0]
+I0 = df_br["infectados"].iloc[0] + 1
+R0 = 0
+S0 = N - I0
+beta = 0.22
+gamma = 0.085
 
-# ---------------------------
-# CLASSE DO SISTEMA
-# ---------------------------
+t = np.arange(len(df_br))
 
-class MercadoPredictor:
-    def __init__(self, df: pd.DataFrame, df_codigos: pd.DataFrame):
-        self.df = df.copy()
-        self.df_codigos = df_codigos.copy()
-        self.col_cbo = None
-        self.col_date = None
-        self.col_salary = None
-        self.col_saldo = None
-        self._identify_columns()
+res_sir = odeint(sir_model, [S0, I0, R0], t, args=(beta, gamma, N))
+S, I, R = res_sir.T
 
-    def _identify_columns(self):
-        # Tentativas comuns (sempre extensível)
-        self.col_cbo = find_column(self.df, ["cbo", "cbo2002ocupacao", "ocupacao", "ocupação"])
-        self.col_date = find_column(self.df, ["competencia", "competenciamov", "data", "mes", "ano"])
-        self.col_salary = find_column(self.df, ["salario", "valorsalariofixo", "remuneracao"])
-        self.col_saldo = find_column(self.df, ["saldomovimentacao", "saldomovimentação", "saldo"])
-        # fallback prints
-        st.write("Colunas detectadas:", dict(
-            cbo=self.col_cbo, date=self.col_date, salary=self.col_salary, saldo=self.col_saldo
-        ))
+# ----------------------
+# 4. MODELO SEIR
+# ----------------------
 
-    def filter_by_cbo(self, cbo_code: str) -> pd.DataFrame:
-        if self.col_cbo is None:
-            return pd.DataFrame()
-        return self.df[self.df[self.col_cbo].astype(str) == str(cbo_code)].copy()
+def seir_model(y, t, beta, sigma, gamma, N):
+    S, E, I, R = y
+    dSdt = -beta * S * I / N
+    dEdt = beta * S * I / N - sigma * E
+    dIdt = sigma * E - gamma * I
+    dRdt = gamma * I
+    return [dSdt, dEdt, dIdt, dRdt]
 
-    def prepare_time_series(self, df_cbo: pd.DataFrame, value_col: str, date_col: str, freq='MS'):
-        # create data frame with date index and value_col aggregated (mean)
-        df_cbo[date_col] = pd.to_datetime(df_cbo[date_col], errors='coerce')
-        df_cbo = df_cbo.dropna(subset=[date_col, value_col])
-        series = df_cbo.set_index(date_col)[value_col].resample(freq).mean().ffill()
-        series = series.rename('y').reset_index()
-        return series
+sigma = 1/5.2   # período médio de incubação
+E0 = 100
+y0_seir = [S0, E0, I0, 0]
 
-    # ---------------------------
-    # Model wrappers
-    # ---------------------------
-    def linear_trend_forecast(self, series: pd.DataFrame, periods: int):
-        X = np.arange(len(series)).reshape(-1,1)
-        y = series['y'].values
-        model = LinearRegression().fit(X, y)
-        future_X = np.arange(len(series), len(series)+periods).reshape(-1,1)
-        preds = model.predict(future_X)
-        return preds, model
+res_seir = odeint(seir_model, y0_seir, t, args=(beta, sigma, gamma, N))
+S2, E2, I2, R2 = res_seir.T
 
-    def prophet_forecast(self, series: pd.DataFrame, periods: int):
-        if not HAS_PROPHET:
-            raise RuntimeError("Prophet não disponível")
-        dfp = series.rename(columns={'index':'ds'}) if 'index' in series.columns else series.copy()
-        dfp = dfp.rename(columns={'date':'ds'} if 'date' in dfp.columns else {})
-        dfp = dfp.rename(columns={'y':'y'})
-        # prophet needs ds and y
-        dfp = dfp[['ds','y']] if 'ds' in dfp.columns else dfp
-        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-        m.fit(dfp)
-        future = m.make_future_dataframe(periods=periods, freq='M')
-        fc = m.predict(future)
-        preds = fc['yhat'].iloc[-periods:].values
-        return preds, m
+# ----------------------
+# 5. MACHINE LEARNING – PREVISÃO DE CASOS
+# ----------------------
 
-    def xgb_lag_forecast(self, series: pd.DataFrame, periods: int, lags=12):
-        if not HAS_XGBOOST:
-            raise RuntimeError("XGBoost não disponível")
-        # create lagged dataset
-        s = series['y'].reset_index(drop=True)
-        dfX = pd.concat([s.shift(i) for i in range(1, lags+1)], axis=1)
-        dfX.columns = [f'lag_{i}' for i in range(1, lags+1)]
-        dfX['y'] = s
-        dfX = dfX.dropna()
-        X = dfX.drop(columns='y').values
-        y = dfX['y'].values
-        model = XGBRegressor(n_estimators=200, random_state=42, verbosity=0)
-        model.fit(X, y)
-        # iterative forecasting
-        last_X = X[-1].copy()
-        preds = []
-        for _ in range(periods):
-            p = model.predict(last_X.reshape(1,-1))[0]
-            preds.append(p)
-            last_X = np.roll(last_X, -1)
-            last_X[-1] = p
-        return preds, model
+df_ml = df_br.copy()
+df_ml["dia"] = np.arange(len(df_ml))
 
-    def arima_forecast(self, series: pd.Series, periods: int):
-        if not HAS_ARIMA:
-            raise RuntimeError("ARIMA/Statsmodels não disponível")
-        y = series.values
-        # simple ARIMA(1,1,1) fallback
-        model = ARIMA(y, order=(1,1,1))
-        fit = model.fit()
-        preds = fit.forecast(steps=periods)
-        return preds, fit
+X = df_ml[["dia"]]
+y = df_ml["casosnovos"]
 
-    def lstm_forecast(self, series: pd.Series, periods: int, lags=12, epochs=40):
-        if not HAS_TF:
-            raise RuntimeError("TensorFlow não disponível")
-        s = series.values
-        # build training lag dataset
-        X, y = [], []
-        for i in range(lags, len(s)):
-            X.append(s[i-lags:i])
-            y.append(s[i])
-        X = np.array(X); y = np.array(y)
-        X = X.reshape((X.shape[0], X.shape[1], 1))
-        model = Sequential()
-        model.add(LSTM(64, input_shape=(X.shape[1],1)))
-        model.add(Dense(1))
-        model.compile(optimizer='adam', loss='mae')
-        model.fit(X,y, epochs=epochs, batch_size=16, verbose=0)
-        last = s[-lags:].reshape((1,lags,1))
-        preds = []
-        for _ in range(periods):
-            p = model.predict(last, verbose=0)[0,0]
-            preds.append(p)
-            last = np.roll(last, -1)
-            last[0,-1,0] = p
-        return preds, model
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-# ---------------------------
-# UI helpers
-# ---------------------------
+modelo = RandomForestRegressor(n_estimators=300, random_state=42)
+modelo.fit(X_train, y_train)
 
-def plot_series(series: pd.DataFrame, title="Série temporal", preds: Optional[Dict[str, Any]] = None):
-    if HAS_PLOTLY:
-        fig = px.line(series, x=series.columns[0], y='y', title=title, labels={series.columns[0]:'Data', 'y':'Valor'})
-        if preds:
-            # build future index
-            last_date = pd.to_datetime(series[series.columns[0]].iloc[-1])
-            future_dates = pd.date_range(last_date + pd.offsets.MonthBegin(1), periods=len(list(preds.values())[0]), freq='MS')
-            for name, arr in preds.items():
-                fig.add_trace(go.Scatter(x=future_dates, y=arr, mode='lines+markers', name=name))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.line_chart(series.set_index(series.columns[0])['y'])
+pred = modelo.predict(X_test)
 
-# ---------------------------
-# APP LÓGICA
-# ---------------------------
+mae = mean_absolute_error(y_test, pred)
+r2 = r2_score(y_test, pred)
 
-with st.sidebar:
-    st.header("Configuração")
-    parquet_path = st.text_input("Caminho do parquet (dados CAGED)", value="dados.parquet")
-    cbo_path = st.text_input("Caminho do arquivo CBO (xlsx)", value="cbo.xlsx")
-    years_min = st.slider("Anos mínimos para considerar histórica", 1, 10, 3)
+print("\n📊 RESULTADOS ML:")
+print(f"MAE = {mae:.2f}")
+print(f"R²  = {r2:.3f}")
 
-# Load
-if not os.path.exists(parquet_path) or not os.path.exists(cbo_path):
-    st.sidebar.error("Forneça caminhos válidos para os arquivos (parquet + cbo.xlsx).")
-    st.stop()
+# Previsão dos próximos 60 dias
+dias_futuros = np.arange(len(df_ml), len(df_ml) + 60)
+pred_futuro = modelo.predict(pd.DataFrame({"dia": dias_futuros}))
 
-with st.spinner("Carregando dados..."):
-    df = safe_read_parquet(parquet_path)
-    df_cod = safe_read_excel(cbo_path)
-    predictor = MercadoPredictor(df, df_cod)
+# ----------------------
+# 6. GRÁFICOS
+# ----------------------
 
-st.success("Dados carregados e verificados.")
+# ----- SIR -----
+plt.plot(df_br["data"], df_br["infectados"], label="Infectados Reais")
+plt.plot(df_br["data"], I, label="Modelo SIR – Infectados")
+plt.title("Modelo SIR – Brasil (2020–2024)")
+plt.xlabel("Data")
+plt.ylabel("Casos")
+plt.legend()
+plt.grid()
+plt.show()
 
-# Search & select
-st.markdown("### 🔎 Buscar profissão (nome ou código)")
-query = st.text_input("Nome ou código CBO")
-if query:
-    res = predictor.df_codigos[predictor.df_codigos['cbo_descricao'].str.contains(query, case=False, na=False)] \
-          if not query.isdigit() else predictor.df_codigos[predictor.df_codigos['cbo_codigo'] == query]
-    if res.empty:
-        st.warning("Nenhuma profissão encontrada.")
-    else:
-        option = st.selectbox("Selecione a profissão", [f"{r['cbo_codigo']} - {r['cbo_descricao']}" for _, r in res.iterrows()])
-        cbo = option.split(" - ")[0]
+# ----- SEIR -----
+plt.plot(df_br["data"], I2, label="Modelo SEIR – Infectados")
+plt.plot(df_br["data"], E2, label="Expostos (SEIR)")
+plt.title("Modelo SEIR – Brasil (2020–2024)")
+plt.xlabel("Data")
+plt.ylabel("Casos")
+plt.legend()
+plt.grid()
+plt.show()
 
-        # Use session_state to avoid DOM removeChild issues
-        if 'generate' not in st.session_state:
-            st.session_state.generate = False
+# ----- ML -----
+plt.plot(df_br["data"].iloc[len(X_train):], y_test, label="Real")
+plt.plot(df_br["data"].iloc[len(X_train):], pred, label="Previsão")
+plt.title("Machine Learning – Random Forest")
+plt.xlabel("Data")
+plt.ylabel("Casos Novos")
+plt.legend()
+plt.grid()
+plt.show()
 
-        if st.button("Gerar análise e previsões"):
-            st.session_state.generate = True
-
-        if st.session_state.generate:
-            placeholder = st.container()
-            with placeholder:
-                df_cbo = predictor.filter_by_cbo(cbo)
-                st.subheader(f"📋 Perfil e dados de: {option.split(' - ',1)[1]}")
-                st.write(f"Registros encontrados: {len(df_cbo):,}")
-
-                # Demografia resumida
-                with st.expander("👥 Perfil demográfico"):
-                    if 'idade' in df_cbo.columns:
-                        st.write("Idade média:", df_cbo['idade'].astype(float).mean())
-                    if 'sexo' in df_cbo.columns:
-                        st.write("Distribuição por sexo:")
-                        st.write(df_cbo['sexo'].astype(str).value_counts(normalize=True).mul(100).round(1).astype(str) + "%")
-
-                # Salário série temporal
-                if predictor.col_salary and predictor.col_date:
-                    try:
-                        series = predictor.prepare_time_series(df_cbo, predictor.col_salary, predictor.col_date)
-                        st.markdown("#### Série salarial (mensal)")
-                        plot_series(series, title="Salário médio mensal")
-                    except Exception as e:
-                        st.error(f"Erro ao construir série salarial: {e}")
-                else:
-                    st.info("Colunas de salário/data não encontradas — impossível gerar série temporal salarial.")
-
-                # Previsões: execute modelos e compare
-                st.markdown("----")
-                st.subheader("🔮 Previsões (comparativo de modelos)")
-
-                periods_years = st.multiselect("Horizontes (anos) para previsão", [1,3,5,10], default=[1,3,5])
-                periods = max(periods_years) * 12
-
-                results = {}
-                errors = []
-
-                if predictor.col_salary and predictor.col_date:
-                    try:
-                        s = predictor.prepare_time_series(df_cbo, predictor.col_salary, predictor.col_date)
-                        # ensure enough history
-                        if len(s) < 12:
-                            st.warning("Histórico curto (<12 meses): previsões simples via média/linear serão usadas.")
-                            # linear fallback
-                            preds_lin, _ = predictor.linear_trend_forecast(s, periods)
-                            results['Linear'] = preds_lin
-                        else:
-                            # Prophet
-                            if HAS_PROPHET:
-                                try:
-                                    preds_p, _ = predictor.prophet_forecast(s.rename(columns={s.columns[0]:'ds'}), periods)
-                                    results['Prophet'] = preds_p
-                                except Exception as e:
-                                    errors.append(f"Prophet erro: {e}")
-                            # ARIMA
-                            if HAS_ARIMA:
-                                try:
-                                    preds_a, _ = predictor.arima_forecast(s['y'], periods)
-                                    results['ARIMA'] = np.array(preds_a)
-                                except Exception as e:
-                                    errors.append(f"ARIMA erro: {e}")
-                            # XGBoost lag
-                            if HAS_XGBOOST:
-                                try:
-                                    preds_xgb, _ = predictor.xgb_lag_forecast(s, periods, lags=12)
-                                    results['XGBoost-Lags'] = np.array(preds_xgb)
-                                except Exception as e:
-                                    errors.append(f"XGBoost erro: {e}")
-                            # LSTM optional
-                            if HAS_TF:
-                                try:
-                                    preds_lstm, _ = predictor.lstm_forecast(s['y'], periods, lags=12, epochs=30)
-                                    results['LSTM'] = np.array(preds_lstm)
-                                except Exception as e:
-                                    errors.append(f"LSTM erro: {e}")
-                    except Exception as e:
-                        st.error(f"Erro ao preparar previsões: {e}")
-                else:
-                    st.info("Sem colunas de salário/data — previsões desabilitadas.")
-
-                # Mostrar resultados resumidos
-                if results:
-                    # Align lengths: choose shortest predictions length to compare
-                    min_len = min(len(v) for v in results.values())
-                    # build future dates base
-                    last_date = pd.to_datetime(df_cbo[predictor.col_date]).max()
-                    future_idx = pd.date_range(last_date + pd.offsets.MonthBegin(1), periods=min_len, freq='MS')
-                    if HAS_PLOTLY:
-                        fig = go.Figure()
-                        # historical series if available
-                        if predictor.col_date and predictor.col_salary:
-                            try:
-                                hist = predictor.prepare_time_series(df_cbo, predictor.col_salary, predictor.col_date)
-                                fig.add_trace(go.Scatter(x=hist[predictor.col_date], y=hist['y'], mode='lines', name='Histórico'))
-                            except:
-                                pass
-                        for name, arr in results.items():
-                            fig.add_trace(go.Scatter(x=future_idx, y=arr[:min_len], mode='lines+markers', name=name))
-                        fig.update_layout(title="Comparativo de previsões", xaxis_title="Data", yaxis_title="Salário")
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        # fallback to simple display
-                        st.write("Predições (amostras):")
-                        for name, arr in results.items():
-                            st.write(f"- {name}: {arr[:min_len].tolist()}")
-                else:
-                    st.info("Nenhum resultado de previsão gerado (verifique disponibilidade de libs).")
-
-                if errors:
-                    with st.expander("Erros / detalhes técnicos"):
-                        for e in errors:
-                            st.write("- " + str(e))
-
-                # Export CSV button for predictions
-                if results:
-                    # produce dataframe of future predictions (min_len)
-                    df_out = pd.DataFrame({name: arr[:min_len] for name, arr in results.items()}, index=future_idx)
-                    csv = df_out.reset_index().rename(columns={'index':'date'}).to_csv(index=False)
-                    st.download_button("📥 Baixar previsões (CSV)", data=csv, file_name=f"previsoes_{cbo}.csv", mime="text/csv")
-
-                # Reset generate if needed
-                if st.button("Nova busca / Limpar"):
-                    st.session_state.generate = False
-                    placeholder.empty()
+# ----- Previsão Futura -----
+plt.plot(dias_futuros, pred_futuro, label="Previsão 60 dias")
+plt.title("Previsão de Casos – 60 dias")
+plt.xlabel("Dias Futuros")
+plt.ylabel("Casos Previstos")
+plt.legend()
+plt.grid()
+plt.show()
