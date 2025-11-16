@@ -31,7 +31,6 @@ def treinar_modelos(X, y):
         r2 = r2_score(y, y_pred)
         mae = mean_absolute_error(y, y_pred)
         resultados[nome] = {"modelo": modelo, "r2": r2, "mae": mae}
-    # Escolher melhor modelo pelo R²
     melhor = max(resultados.items(), key=lambda x: x[1]['r2'])
     return melhor, resultados
 
@@ -45,6 +44,13 @@ def previsoes_futuras(modelo, anos_futuros):
         'Salário Previsto (R$)': [formatar_moeda(v) for v in previsoes]
     })
 
+# Simulação de base CBO
+cbo_dict = {
+    "Pintor de Obras": "514105",
+    "Pintor de Automóveis": "514110",
+    "Pintor Artístico": "514115"
+}
+
 # Streamlit app
 st.title("Previsão Salarial e Tendência de Mercado")
 
@@ -53,8 +59,19 @@ with placeholder.container():
     profissao_input = st.text_input("Digite o nome ou código da profissão:")
 
     if profissao_input:
-        # Simulação de verificação da profissão
-        profissao = profissao_input.title()
+        # Verifica se é genérico e pede seleção do CBO
+        opcoes = [nome for nome in cbo_dict.keys() if profissao_input.lower() in nome.lower()]
+        
+        if len(opcoes) > 1:
+            cbo_selecionado = st.selectbox("Selecione o CBO correto:", opcoes)
+        elif len(opcoes) == 1:
+            cbo_selecionado = opcoes[0]
+        else:
+            st.warning("Profissão não encontrada. Digite outro nome ou código.")
+            st.stop()
+
+        # Dados da profissão selecionada
+        profissao = cbo_selecionado
         salario_atual = df['Salario'].iloc[-1]
 
         st.markdown(f"### Profissão: **{profissao}**")
