@@ -20,6 +20,7 @@ class MercadoTrabalhoPredictor:
         self.df_codigos = None
         self.cleaned = False
 
+    # ------------------------------------------------------------
     def formatar_moeda(self, valor):
         try:
             return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -104,11 +105,11 @@ class MercadoTrabalhoPredictor:
         prof_info = self.df_codigos[self.df_codigos["cbo_codigo"] == cbo_codigo]
         nome = prof_info.iloc[0]["cbo_descricao"] if not prof_info.empty else f"CBO {cbo_codigo}"
 
-        st.markdown(f"## **Profissão:** {nome}\n")
+        texto = f"## **Profissão:** {nome}\n\n"
 
         df_cbo = df[df[col_cbo].astype(str) == cbo_codigo].copy()
         if df_cbo.empty:
-            st.warning("Nenhum dado encontrado para esta profissão.")
+            st.markdown("⚠️ Nenhum dado encontrado para esta profissão.")
             return
 
         # ===================== SALÁRIOS =============================
@@ -120,47 +121,41 @@ class MercadoTrabalhoPredictor:
         df_mensal = df_cbo.groupby("tempo_meses")[col_salario].mean().reset_index()
 
         salario_atual = df_mensal[col_salario].iloc[-1]
-        st.write(f"**Salário médio atual:** R$ {self.formatar_moeda(salario_atual)}\n")
+        texto += f"**Salário médio atual:** R$ {self.formatar_moeda(salario_atual)}\n\n"
 
         # ========= TREINAR MODELOS ==========
         X = df_mensal[["tempo_meses"]]
         y = df_mensal[col_salario]
 
-        vencedor_nome, vencedor, todos = self.treinar_modelos(X, y)
+        vencedor_nome, vencedor, _ = self.treinar_modelos(X, y)
 
         modelo = vencedor["modelo"]
         r2 = vencedor["r2"] * 100
         mae = vencedor["mae"]
 
-        st.write(f"**Modelo vencedor:** {vencedor_nome} (R²={r2:.2f}%, MAE={mae:.2f})\n")
-
-        # ======= PREVISÃO FUTURA =========
-        st.markdown("### **Previsão salarial futura do melhor modelo:**")
+        texto += f"**Modelo vencedor:** {vencedor_nome} (R²={r2:.2f}%, MAE={mae:.2f})\n\n"
+        texto += "### **Previsão salarial futura do melhor modelo:**\n"
 
         ult_mes = df_mensal["tempo_meses"].max()
-        texto_prev = ""
 
         for anos in anos_futuros:
             futuro = ult_mes + anos * 12
             pred = modelo.predict([[futuro]])[0]
-            texto_prev += f"**{anos} anos → R$ {self.formatar_moeda(pred)}**\n"
-
-        st.markdown(texto_prev)
+            texto += f"- **{anos} anos → R$ {self.formatar_moeda(pred)}**\n"
 
         # ===================== TENDÊNCIA DE MERCADO ==========================
-        st.markdown("""
-        ---
-        ## 📈 **TENDÊNCIA DE MERCADO**
-        """)
+        texto += "\n---\n## 📈 **TENDÊNCIA DE MERCADO**\n"
 
         if col_saldo not in df_cbo.columns:
-            st.info("Sem dados de movimentação para projetar demanda.")
+            texto += "Sem dados de movimentação.\n"
+            st.markdown(texto)
             return
 
         df_saldo = df_cbo.groupby("tempo_meses")[col_saldo].sum().reset_index()
 
         if len(df_saldo) < 2:
-            st.info("Dados insuficientes para prever vagas.")
+            texto += "Dados insuficientes para prever vagas.\n"
+            st.markdown(texto)
             return
 
         Xs = df_saldo[["tempo_meses"]]
@@ -176,10 +171,8 @@ class MercadoTrabalhoPredictor:
         else:
             status_hist = "RETRAÇÃO"
 
-        st.markdown(f"**Situação histórica recente:** {status_hist}\n")
-        st.markdown("### **Projeção de saldo de vagas:**")
-
-        texto_vagas = ""
+        texto += f"**Situação histórica recente:** {status_hist}\n\n"
+        texto += "### **Projeção de saldo de vagas:**\n"
 
         ult_mes_s = df_saldo["tempo_meses"].max()
 
@@ -187,9 +180,10 @@ class MercadoTrabalhoPredictor:
             futuro = ult_mes_s + anos * 12
             pred = mod_saldo.predict([[futuro]])[0]
             seta = "→" if abs(pred) < 5 else ("↑" if pred > 0 else "↓")
-            texto_vagas += f"**{anos} anos:** {int(pred)} ({seta})\n"
+            texto += f"- **{anos} anos:** {int(pred)} ({seta})\n"
 
-        st.markdown(texto_vagas)
+        # ---- Mostrar tudo de uma vez (EVITA O ERRO) ----
+        st.markdown(texto)
 
 
 # ============================================================
