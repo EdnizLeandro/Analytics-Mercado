@@ -1,119 +1,87 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import time
-from prophet import Prophet
-import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
+import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Previsão Salarial", layout="wide")
+st.title("Previsão de Salários por Profissão")
 
-st.title("Previsão Salarial por Profissão")
-st.write("Selecione a profissão e veja as previsões futuras com explicações detalhadas dos gráficos.")
+# --- CARREGAR DADOS ---
+uploaded_file = st.file_uploader("Escolha um arquivo CSV", type="csv")
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    
+    # Converter 'competênciamov' para datetime
+    df["competênciamov"] = df["competênciamov"].astype(str)
+    df["data"] = pd.to_datetime(df["competênciamov"], format="%Y%m")
 
-# -------------------------------
-# 1. Seleção de profissão
-# -------------------------------
-profissao = st.selectbox(
-    "Selecione a profissão:",
-    ["Vendedor Pracista", "Vendedor Interno"]
-)
+    st.write("Primeiras linhas do dataset:")
+    st.dataframe(df.head())
 
-# -------------------------------
-# 2. Carregar dados (simulado)
-# -------------------------------
-@st.cache_data
-def carregar_dados(profissao):
-    # Simula histórico salarial mensal
-    np.random.seed(42)
-    datas = pd.date_range("2015-01-01", "2025-01-01", freq="M")
-    salarios = np.random.normal(loc=3000, scale=500, size=len(datas))
-    df = pd.DataFrame({"data": datas, "salario": salarios})
-    return df
+    # --- SELEÇÃO DE PROFISSÃO ---
+    profissao = st.selectbox("Selecione a profissão:", df["profissao"].unique())
+    df_prof = df[df["profissao"] == profissao].copy()
+    
+    st.write(f"Dados filtrados para a profissão: **{profissao}**")
 
-df = carregar_dados(profissao)
+    # --- PREPARAR DADOS ---
+    # Transformar datetime em número para os modelos
+    df_prof["data_num"] = df_prof["data"].map(pd.Timestamp.toordinal)
+    X = df_prof[["data_num"]]
+    y = df_prof["salario"]
 
-st.subheader("Histórico Salarial")
-st.line_chart(df.rename(columns={"data": "index"}).set_index("index")["salario"])
-st.info("Este gráfico mostra o histórico dos salários médios mensais para a profissão selecionada.")
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=False)
 
-# -------------------------------
-# 3. Função de treinamento assíncrona
-# -------------------------------
-def treinar_modelos(df):
-    """
-    Treina Prophet e XGBoost e retorna previsões.
-    """
-    previsoes = {}
+    # --- TREINAR VÁRIOS MODELOS ---
+    modelos = {
+        "XGBoost": xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100),
+        "RandomForest": RandomForestRegressor(n_estimators=100, random_state=42),
+        "LinearRegression": LinearRegression()
+    }
 
-    # Prophet
-    df_prophet = df.rename(columns={"data": "ds", "salario": "y"})
-    modelo_prophet = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-    modelo_prophet.fit(df_prophet)
-    futuro = modelo_prophet.make_future_dataframe(periods=12*2, freq="M")  # 2 anos
-    pred_prophet = modelo_prophet.predict(futuro)
-    previsoes["prophet"] = pred_prophet[["ds", "yhat"]]
+    resultados = {}
+    for nome, model in modelos.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        resultados[nome] = {"modelo": model, "rmse": rmse}
 
-    # XGBoost (simplificado)
-    df_xgb = df.copy()
-    df_xgb["mes"] = df_xgb["data"].dt.month
-    df_xgb["ano"] = df_xgb["data"].dt.year
-    X = df_xgb[["ano", "mes"]]
-    y = df_xgb["salario"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-    modelo_xgb = xgb.XGBRegressor(n_estimators=100)
-    modelo_xgb.fit(X_train, y_train)
-    # Previsão para os próximos 24 meses
-    ult_ano, ult_mes = X["ano"].iloc[-1], X["mes"].iloc[-1]
-    futuros = []
-    for i in range(1, 25):
-        mes = ult_mes + i
-        ano = ult_ano + (mes-1)//12
-        mes = (mes-1)%12 + 1
-        futuros.append([ano, mes])
-    futuros = pd.DataFrame(futuros, columns=["ano", "mes"])
-    pred_xgb = modelo_xgb.predict(futuros)
-    futuros["salario"] = pred_xgb
-    previsoes["xgboost"] = futuros
+    # --- ESCOLHER MELHOR MODELO ---
+    melhor_nome = min(resultados, key=lambda x: resultados[x]["rmse"])
+    melhor_modelo = resultados[melhor_nome]["modelo"]
+    melhor_rmse = resultados[melhor_nome]["rmse"]
 
-    return previsoes
+    st.write(f"✅ Melhor modelo: **{melhor_nome}** com RMSE = **{melhor_rmse:.2f}**")
 
-# -------------------------------
-# 4. Treinamento com spinner (assíncrono)
-# -------------------------------
-st.subheader("Treinamento de Modelos")
-with st.spinner("Treinando modelos, isso pode levar alguns segundos..."):
-    previsoes = treinar_modelos(df)
-st.success("Modelos treinados com sucesso!")
+    # --- PREDIÇÃO E TENDÊNCIA ---
+    df_prof["predicao"] = melhor_modelo.predict(X)
 
-# -------------------------------
-# 5. Exibição de previsões
-# -------------------------------
-st.subheader("Previsões Futuras")
+    # Previsão futura (ex.: 12 meses)
+    ult_data = df_prof["data"].max()
+    datas_fut = pd.date_range(start=ult_data + pd.DateOffset(months=1), periods=12, freq='M')
+    datas_fut_num = datas_fut.map(pd.Timestamp.toordinal).to_numpy().reshape(-1, 1)
+    pred_fut = melhor_modelo.predict(datas_fut_num)
 
-# Prophet
-st.write("📈 **Previsão pelo Prophet (tendência + sazonalidade)**")
-st.line_chart(previsoes["prophet"].set_index("ds")["yhat"])
-st.info("Este gráfico mostra a previsão salarial baseada no Prophet, que captura tendências e padrões sazonais históricas.")
+    # --- GRÁFICO ---
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df_prof["data"], df_prof["salario"], label="Salário Real", marker='o')
+    ax.plot(df_prof["data"], df_prof["predicao"], label="Predição Modelo", linestyle="--")
+    ax.plot(datas_fut, pred_fut, label="Projeção Futura", linestyle=":", color="red")
+    ax.set_title(f"Tendência do Salário para {profissao}")
+    ax.set_xlabel("Data")
+    ax.set_ylabel("Salário")
+    ax.legend()
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
 
-# XGBoost
-st.write("📊 **Previsão pelo XGBoost (modelo de regressão)**")
-xgb_chart = previsoes["xgboost"].copy()
-xgb_chart["data"] = pd.to_datetime(xgb_chart[["ano", "mes"]].assign(day=1))
-st.line_chart(xgb_chart.set_index("data")["salario"])
-st.info("Este gráfico mostra a previsão salarial usando XGBoost, que tenta aprender padrões complexos nos dados históricos.")
-
-# -------------------------------
-# 6. Comparação de modelos
-# -------------------------------
-st.subheader("Resumo das Previsões")
-st.write("Aqui você pode comparar visualmente as previsões dos dois modelos e analisar diferenças.")
-st.line_chart(
-    pd.concat([
-        previsoes["prophet"].set_index("ds")["yhat"].rename("Prophet"),
-        xgb_chart.set_index("data")["salario"].rename("XGBoost")
-    ], axis=1)
-)
-st.info("Comparando os dois modelos, você pode ver como Prophet e XGBoost projetam o salário para os próximos meses.")
-
+    st.write("""
+    **Explicação do gráfico:**  
+    - Linha sólida: valores reais de salário.  
+    - Linha tracejada: valores previstos pelo modelo treinado.  
+    - Linha pontilhada vermelha: projeção futura para os próximos 12 meses.  
+    - RMSE indica o erro médio das previsões; quanto menor, melhor o modelo.
+    """)
