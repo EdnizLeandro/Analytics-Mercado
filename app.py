@@ -236,15 +236,3 @@ if escolha:
 
     st.subheader("Previsão de até 20 anos")
     st.line_chart(previsao.set_index("data")["y"])
-    
-    # ---------- EXPLICAÇÃO DO GRÁFICO ----------
-    st.markdown(
-        """
-        **Explicação do gráfico:**  
-        Este gráfico mostra a previsão da evolução do valor selecionado (ex.: salário médio) para a profissão escolhida.  
-        - O eixo **x** representa o tempo (meses), começando na última data disponível no histórico até 20 anos à frente.  
-        - O eixo **y** representa os valores previstos.  
-        - A linha indica a tendência projetada pelo modelo, permitindo observar períodos de crescimento, estabilidade ou queda.  
-        Essas informações ajudam a compreender o comportamento futuro do mercado para esta profissão.
-        """
-    )
