@@ -4,12 +4,12 @@ import numpy as np
 import unicodedata
 
 from prophet import Prophet
-from sklearn.metrics import mean_squared_error
 from xgboost import XGBRegressor
+from sklearn.metrics import mean_squared_error
 
-# --------------------------------------------
-# FUNÇÃO DE NORMALIZAÇÃO DE TEXTO
-# --------------------------------------------
+# ----------------------------------------------------------
+# FUNÇÃO PARA NORMALIZAR TEXTO
+# ----------------------------------------------------------
 def normalizar(texto):
     if not isinstance(texto, str):
         return ""
@@ -19,9 +19,9 @@ def normalizar(texto):
         if unicodedata.category(c) != "Mn"
     )
 
-# --------------------------------------------
+# ----------------------------------------------------------
 # CARREGAR CBO
-# --------------------------------------------
+# ----------------------------------------------------------
 @st.cache_data
 def carregar_dados_cbo():
     df = pd.read_excel("cbo.xlsx")
@@ -32,9 +32,9 @@ def carregar_dados_cbo():
     df["Descrição_norm"] = df["Descrição"].apply(normalizar)
     return df
 
-# --------------------------------------------
+# ----------------------------------------------------------
 # CARREGAR HISTÓRICO
-# --------------------------------------------
+# ----------------------------------------------------------
 @st.cache_data
 def carregar_historico():
     df = pd.read_parquet("dados.parquet")
@@ -46,6 +46,7 @@ def carregar_historico():
             if unicodedata.category(c) != "Mn"
         )
         cols_norm[col] = col_norm
+
     df.columns = cols_norm.values()
 
     col_cbo = next((c for c in df.columns if "cbo" in c), None)
@@ -56,53 +57,84 @@ def carregar_historico():
 
     return df, col_cbo, col_sal
 
-# --------------------------------------------
-# BUSCA PROFISSÃO
-# --------------------------------------------
+# ----------------------------------------------------------
+# BUSCA PROFISSÕES
+# ----------------------------------------------------------
 def buscar_profissoes(df_cbo, texto):
     tnorm = normalizar(texto)
     if texto.isdigit():
         return df_cbo[df_cbo["Código"] == texto]
     return df_cbo[df_cbo["Descrição_norm"].str.contains(tnorm, na=False)]
 
-# ================================================================
-# MODELOS DE PREVISÃO
-# ================================================================
+# ----------------------------------------------------------
+# CRIAR COLUNA DE DATA DE FORMA INTELIGENTE
+# ----------------------------------------------------------
+def criar_datas_seguras(df):
+    df_sal = df.copy()
+    df_sal["y"] = df_sal.iloc[:, 0]
+
+    # 1) Se existir ano/mes no parquet
+    col_ano = next((c for c in df_sal.columns if "ano" in c), None)
+    col_mes = next((c for c in df_sal.columns if "mes" in c), None)
+
+    if col_ano and col_mes:
+        df_sal["data"] = pd.to_datetime(
+            df_sal[col_ano].astype(str) + "-" + df_sal[col_mes].astype(str) + "-01"
+        )
+        return df_sal[["data", "y"]]
+
+    # 2) Se existir 'competencia' tipo 202001
+    if "competencia" in df_sal.columns:
+        df_sal["data"] = pd.to_datetime(df_sal["competencia"].astype(str), format="%Y%m")
+        return df_sal[["data", "y"]]
+
+    # 3) Gerar datas artificiais seguras
+    start_year = 2010
+    max_year = 2100
+    n = len(df_sal)
+
+    end_year = min(start_year + n // 12, max_year)
+
+    datas = pd.date_range(
+        start=f"{start_year}-01-01", 
+        end=f"{end_year}-12-01", 
+        freq="M"
+    )
+    datas = list(datas)[:n]
+
+    df_sal["data"] = datas
+    return df_sal[["data", "y"]]
+
+# ----------------------------------------------------------
+# TREINAMENTO DO MELHOR MODELO
+# ----------------------------------------------------------
 def treinar_e_escolher_melhor_modelo(df):
     df = df.sort_values("data").dropna()
 
     if len(df) < 24:
-        return None  # dados insuficientes
+        return None
 
     split = int(len(df) * 0.8)
     train = df.iloc[:split]
     valid = df.iloc[split:]
 
-    y_train = train["y"].values
-    y_valid = valid["y"].values
-
     results = {}
 
-    # ------------------------------
     # PROPHET
-    # ------------------------------
     try:
-        prophet_df = train.rename(columns={"data": "ds"})
-        prophet_model = Prophet()
-        prophet_model.fit(prophet_df)
+        prophet_df = train.rename(columns={"data": "ds", "y": "y"})
+        model_prophet = Prophet()
+        model_prophet.fit(prophet_df)
 
         future = valid.rename(columns={"data": "ds"})
-        forecast = prophet_model.predict(future)
-        prophet_pred = forecast["yhat"].values
+        pred = model_prophet.predict(future)["yhat"].values
 
-        rmse_prophet = np.sqrt(mean_squared_error(y_valid, prophet_pred))
-        results["prophet"] = (rmse_prophet, prophet_model)
-    except Exception as e:
-        print("Prophet falhou:", e)
+        rmse = np.sqrt(mean_squared_error(valid["y"].values, pred))
+        results["prophet"] = (rmse, model_prophet)
+    except:
+        pass
 
-    # ------------------------------
     # XGBOOST
-    # ------------------------------
     try:
         df_ml = df.copy()
         df_ml["mes"] = df_ml["data"].dt.month
@@ -114,46 +146,49 @@ def treinar_e_escolher_melhor_modelo(df):
         xgb = XGBRegressor(n_estimators=300, learning_rate=0.05)
         xgb.fit(train_ml[["mes", "ano"]], train_ml["y"])
 
-        xgb_pred = xgb.predict(valid_ml[["mes", "ano"]])
-        rmse_xgb = np.sqrt(mean_squared_error(valid_ml["y"], xgb_pred))
-        results["xgboost"] = (rmse_xgb, xgb)
-    except Exception as e:
-        print("XGBoost falhou:", e)
+        pred = xgb.predict(valid_ml[["mes", "ano"]])
+        rmse = np.sqrt(mean_squared_error(valid_ml["y"], pred))
+        results["xgboost"] = (rmse, xgb)
+    except:
+        pass
 
     if not results:
         return None
 
-    melhor_modelo_nome = min(results, key=lambda m: results[m][0])
-    melhor_rmse, melhor_modelo = results[melhor_modelo_nome]
+    best_name = min(results, key=lambda m: results[m][0])
+    rmse, model = results[best_name]
 
-    return {
-        "melhor_modelo": melhor_modelo,
-        "modelo_nome": melhor_modelo_nome,
-        "rmse": melhor_rmse
-    }
+    return {"modelo_nome": best_name, "melhor_modelo": model, "rmse": rmse}
 
-
-# --------------------------------------------
+# ----------------------------------------------------------
 # PREVISÃO
-# --------------------------------------------
-def prever(melhor_modelo, modelo_nome, df, anos=20):
-    if modelo_nome == "prophet":
-        future = melhor_modelo.make_future_dataframe(periods=anos * 12, freq="M")
-        forecast = melhor_modelo.predict(future)
-        return forecast.rename(columns={"ds": "data", "yhat": "y"})[["data", "y"]]
+# ----------------------------------------------------------
+def prever(modelo, modelo_nome, df, anos=20):
+    MAX_YEAR = 2100
+    start = df["data"].max()
 
-    elif modelo_nome == "xgboost":
-        datas = pd.date_range(start=df["data"].max(), periods=anos*12 + 1, freq="M")
+    if start.year >= MAX_YEAR:
+        start = pd.Timestamp(f"{MAX_YEAR}-01-01")
+
+    n_periods = anos * 12 + 1
+    datas = pd.date_range(start=start, periods=n_periods, freq="M")
+
+    if modelo_nome == "prophet":
+        future = modelo.make_future_dataframe(periods=anos * 12, freq="M")
+        fc = modelo.predict(future)
+        return fc[["ds", "yhat"]].rename(columns={"ds": "data", "yhat": "y"})
+
+    if modelo_nome == "xgboost":
         temp = pd.DataFrame({"data": datas[1:]})
         temp["mes"] = temp["data"].dt.month
         temp["ano"] = temp["data"].dt.year
-        temp["y"] = melhor_modelo.predict(temp[["mes", "ano"]])
+        temp["y"] = modelo.predict(temp[["mes", "ano"]])
         return temp
 
-# ================================================================
+# ----------------------------------------------------------
 # INTERFACE STREAMLIT
-# ================================================================
-st.set_page_config(page_title="Mercado de Trabalho - Previsões Inteligentes", layout="wide")
+# ----------------------------------------------------------
+st.set_page_config(page_title="Mercado de Trabalho - IA", layout="wide")
 st.title("Previsão Inteligente do Mercado de Trabalho (CAGED + IA)")
 
 df_cbo = carregar_dados_cbo()
@@ -162,45 +197,37 @@ df_hist, COL_CBO, COL_SALARIO = carregar_historico()
 entrada = st.text_input("Digite nome ou código da profissão:")
 
 if entrada:
-    resultado = buscar_profissoes(df_cbo, entrada)
-    if resultado.empty:
+    res = buscar_profissoes(df_cbo, entrada)
+    if res.empty:
         st.warning("Nenhuma profissão encontrada.")
         st.stop()
-    lista_profissoes = (resultado["Descrição"] + " (" + resultado["Código"] + ")").tolist()
+    lista = (res["Descrição"] + " (" + res["Código"] + ")").tolist()
 else:
-    lista_profissoes = []
+    lista = []
 
-escolha = st.selectbox("Selecione a profissão:", [""] + lista_profissoes)
+escolha = st.selectbox("Selecione a profissão:", [""] + lista)
 
-# ------------------------------
-# MOSTRAR RESULTADOS
-# ------------------------------
 if escolha:
-    cbo_codigo = escolha.split("(")[-1].replace(")", "").strip()
-    descricao = escolha.split("(")[0].strip()
-    st.header(f"Profissão: {descricao}")
+    cbo = escolha.split("(")[-1].replace(")", "").strip()
+    desc = escolha.split("(")[0].strip()
 
-    dados_prof = df_hist[df_hist[COL_CBO] == cbo_codigo]
+    st.header(f"Profissão: {desc}")
 
-    if dados_prof.empty:
-        st.error("Sem dados para esta profissão.")
+    dados = df_hist[df_hist[COL_CBO] == cbo]
+
+    if dados.empty:
+        st.error("Sem dados.")
         st.stop()
 
-    # PREPARAR SÉRIE COM DATA SEGURA
-    df_sal = dados_prof[[COL_SALARIO]].copy()
-    df_sal["y"] = df_sal[COL_SALARIO]
-
-    # GERA DATAS MENSAL AUTOMÁTICAS — SEM ERRO DE DOM
-    df_sal["data"] = pd.date_range(start="2010-01-01", periods=len(df_sal), freq="M")
-
-    df_sal = df_sal[["data", "y"]]
+    # CRIAR SÉRIE COM DATAS SEGURAS
+    df_sal = criar_datas_seguras(dados[[COL_SALARIO]])
 
     st.subheader("Treinando modelos...")
 
     modelo = treinar_e_escolher_melhor_modelo(df_sal)
 
     if modelo is None:
-        st.error("Sem dados suficientes para treinar modelos.")
+        st.error("Dados insuficientes.")
         st.stop()
 
     st.success(f"Modelo escolhido: **{modelo['modelo_nome']}** (RMSE: {modelo['rmse']:.2f})")
