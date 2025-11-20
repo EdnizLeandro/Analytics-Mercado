@@ -16,7 +16,7 @@ Pesquise por profissão _digitando o nome completo ou parcial_ (ex: **pintor**, 
 @st.cache_data
 def carregar_dados():
     try:
-        df = pd.read_csv("cache_Jobin.csv")
+        df = pd.read_csv("cache_Jobin1.csv")
         return df
     except Exception as e:
         st.error(f"Erro ao carregar os dados: {e}")
