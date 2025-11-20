@@ -8,7 +8,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("🔎 Consulta de Profissões pelo Nome ou CBO")
+st.title("🔎 Previsão Inteligente do Mercado de Trabalho (Jobin + Novo CAGED")
 st.markdown("""
 Pesquise por profissão _digitando o nome completo ou parcial_ (ex: **pintor**, **analista**, **enfermeiro**) e escolha o CBO desejado para visualizar projeções salariais e tendências de mercado.
 """)
