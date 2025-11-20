@@ -16,7 +16,7 @@ Pesquise por profissão _digitando o nome completo ou parcial_ (ex: **pintor**, 
 @st.cache_data
 def carregar_dados():
     try:
-        df = pd.read_csv("cache_Jobin1.csv")  # utilize o arquivo correto
+        df = pd.read_csv("cache_Jobin1.csv")  # use o arquivo adequado
         return df
     except Exception as e:
         st.error(f"Erro ao carregar os dados: {e}")
@@ -111,22 +111,8 @@ if df is not None:
             icon="📊"
         )
 
-        with st.expander("Detalhes Técnicos do Modelo"):
-            st.write("Modelo vencedor, score, projeções salariais e interpretação das tendências.")
-            st.json({
-                "Modelo Vencedor": info['modelo_vencedor'],
-                "Score": float(info['score']),
-                "Projeções Salariais": {
-                    "+5 anos": float(info["previsao_5"]),
-                    "+10 anos": float(info["previsao_10"]),
-                    "+15 anos": float(info["previsao_15"]),
-                    "+20 anos": float(info["previsao_20"])
-                },
-                "Tendência Salarial": info["tendencia_salarial"],
-                "Tendência Mercado": info["tendencia_mercado"]
-            })
 else:
-    st.error("Dados não carregados. Verifique o arquivo 'cache_Jobin_acrescimo_composto.csv'.")
+    st.error("Dados não carregados. Verifique o arquivo 'cache_Jobin1.csv'.")
 
 st.markdown(
     "<hr style='margin-top:2em;margin-bottom:1em;'>"
